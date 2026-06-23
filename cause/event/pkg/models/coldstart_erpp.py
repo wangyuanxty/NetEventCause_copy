@@ -67,6 +67,12 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
             v = nn.Parameter(self.embed[str(k)].data.clone())
             n_steps = 1
 
+        # 正则参考: 已知类型嵌入的均值, 防止 v 偏离太远
+        known_vecs = torch.stack([self.embed[str(t)].data
+                                   for t in range(self.current_n_types)
+                                   if t in self._seen], dim=0)
+        v_prior = known_vecs.mean(dim=0) if len(known_vecs) > 0 else torch.zeros(d, device=device)
+
         opt = torch.optim.Adam([v], lr=self.ttf_lr)
 
         self.eval()
@@ -76,7 +82,9 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
             log_ints, _ = super().forward(event_seqs, need_weights=True, event_type='category')
             mask_k = (event_seqs[:, :, 1].long() == k)
-            loss = -log_ints[:, :, k][mask_k].mean()
+            nll = -log_ints[:, :, k][mask_k].mean()
+            reg = ((v - v_prior).pow(2).sum()) * 0.01   # 正则: 不偏离已知嵌入中心太远
+            loss = nll + reg
 
             opt.zero_grad()
             loss.backward()

@@ -84,28 +84,46 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
 class ColdStartLoRA(ExplainableRecurrentPointProcess):
     """
-    v_k = W @ c_k,   W ∈ R^{d×r} (共享), c_k ∈ R^r (每类型独立).
-
-    训练: W + 所有已知 c_k 联合学习
-    推理: W 冻结, 新类型 c_k 做 TTF (r 维, 收敛快)
+    推理时低秩 TTF。训练 = 标准 ERPP, 不学 W/c。
+    推理时用梯度下降拟合低秩分解 W·c_k ≈ v_k, 然后冻结 W, TTF 新类型的 c。
     """
 
     def __init__(self, rank: int = 16, ttf_steps: int = 5, ttf_lr: float = 0.01, **kwargs):
-        self.rank = rank
         super().__init__(**kwargs)
-        self.W = nn.Parameter(torch.randn(self.embedding_dim, rank) * 0.02)
+        self.rank = rank
         self.ttf_steps = ttf_steps
         self.ttf_lr = ttf_lr
         self._seen: set[int] = set()
         self._ttf_done: set[int] = set()
         self._ttf_enabled: bool = False
+        self.W: torch.Tensor | None = None
 
     def mark_seen(self, types: set[int]):
         self._seen |= types
 
+    def _build_lora(self, lora_epochs: int = 200):
+        """梯度下降拟合 W·c_k ≈ v_k for known types. 不修改 v_k."""
+        if self.W is not None:
+            return
+        device = self.get_model_device()
+        known = [t for t in range(self.current_n_types) if t in self._seen]
+        V = torch.stack([self.embed[str(t)].data for t in known], dim=0)  # [K, d]
+        r = min(self.rank, len(known))
+        W = nn.Parameter(torch.randn(self.embedding_dim, r, device=device) * 0.02)
+        C = nn.Parameter(torch.randn(r, len(known), device=device) * 0.02)
+        opt = torch.optim.Adam([W, C], lr=0.01)
+        for _ in range(lora_epochs):
+            loss = ((W @ C).T - V).pow(2).sum()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+        self.W = W.detach()
+        self.c_map: dict[int, torch.Tensor] = {known[i]: C[:, i].detach() for i in range(len(known))}
+
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):
         if self._ttf_enabled and event_type == 'category':
+            self._build_lora()
             cold_k = [k for k in event_seqs[:, :, 1].long().unique().tolist()
                       if k not in self._seen and k < self.current_n_types]
             if cold_k:
@@ -115,59 +133,19 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
                     self.refine_c(event_seqs, k, dev)
         return super().forward(event_seqs, event_type, need_weights, target_type, device)
 
-    def update_event_type(self, event_type, device):
-        """c_k 是 rank 维."""
-        self.embed[str(event_type)] = nn.Parameter(
-            torch.randn(self.rank, device=device) * 0.02
-        )
-        self.log_intensities_prior[str(event_type)] = nn.Parameter(
-            torch.zeros(1, device=device), requires_grad=True
-        )
-        self.max_type_index = max(int(event_type), self.max_type_index)
-        if self.optim is not None:
-            self.optim.add_param_group({'params': self.log_intensities_prior[str(event_type)]})
-            self.optim.add_param_group({'params': self.embed[str(event_type)]})
-
-    def event_type2embedding(self, event_seqs, device=None):
-        if device is None:
-            device = self.get_model_device()
-        embedding_seqs = []
-        for seq in event_seqs:
-            embedding_seqs.append(
-                torch.stack([
-                    torch.cat([
-                        torch.FloatTensor([t]).to(device),
-                        self.W @ self.setdefault_embed(int(event_type), device),
-                    ]) if int(event_type) < self.current_n_types else
-                    torch.cat([
-                        torch.FloatTensor([t]).to(device),
-                        torch.zeros(self.embedding_dim, device=device),
-                    ])
-                    for t, event_type in seq
-                ], dim=0)
-            )
-        return torch.stack(embedding_seqs, dim=0)
-
-    def return_all_parameters(self, dim=1):
-        cs = torch.stack([self.embed[str(t)] for t in range(self.current_n_types)], dim=1)
-        result = self.W @ cs  # [d, n]
-        if dim == 0:
-            return result.T  # [n, d]
-        return result
-
     def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
         """冻结 W, 只优化 r 维 c_k."""
-        r = self.rank
+        r = self.W.size(1)
         is_first = k not in self._ttf_done
         self._ttf_done.add(k)
         if is_first:
             c = nn.Parameter(torch.randn(r, device=device) * 0.02)
             n_steps = self.ttf_steps
         else:
-            c = nn.Parameter(self.embed[str(k)].data.clone())
+            c = nn.Parameter(self.c_map.get(k, torch.randn(r, device=device) * 0.02))
             n_steps = 1
 
-        known_vecs = torch.stack([self.W @ self.embed[str(t)].data
+        known_vecs = torch.stack([self.embed[str(t)].data
                                    for t in range(self.current_n_types)
                                    if t in self._seen], dim=0)
         v_prior = known_vecs.mean(dim=0) if len(known_vecs) > 0 else torch.zeros(self.embedding_dim, device=device)
@@ -189,4 +167,5 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
             self.embed[str(k)].data = orig
         final_v = (self.W @ c).detach()
         self.embed[str(k)].data = final_v
+        self.c_map[k] = c.detach()
         return final_v

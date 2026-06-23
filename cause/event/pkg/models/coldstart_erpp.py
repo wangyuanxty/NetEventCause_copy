@@ -58,8 +58,8 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         """
         d = self.embedding_dim
         cnt = self._ttf_count.get(k, 0)
-        is_first = cnt < 20
-        if cnt >= 20:
+        is_first = cnt < 50
+        if cnt >= 50:
             return None  # 已收敛, 不微调, 直接用当前嵌入
         self._ttf_count[k] = cnt + 1
 
@@ -196,9 +196,9 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
     def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
         """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维). 前20次5步, 后续不微调."""
         cnt = self._ttf_count.get(k, 0)
-        is_first = cnt < 20
+        is_first = cnt < 50
         self._ttf_count[k] = cnt + 1
-        if cnt >= 20:
+        if cnt >= 50:
             return
 
         if is_first:

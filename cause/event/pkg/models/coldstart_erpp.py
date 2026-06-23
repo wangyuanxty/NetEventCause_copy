@@ -58,15 +58,17 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         """
         d = self.embedding_dim
         cnt = self._ttf_count.get(k, 0)
-        is_first = cnt < 3
+        is_first = cnt < 20
+        if cnt >= 20:
+            return None  # 已收敛, 不微调, 直接用当前嵌入
         self._ttf_count[k] = cnt + 1
 
         if is_first:
             v = nn.Parameter(torch.randn(d, device=device) * 0.02)
-            n_steps = self.ttf_steps       # 5
+            n_steps = self.ttf_steps
         else:
-            v = nn.Parameter(torch.randn(d, device=device) * 0.02)
-            n_steps = max(3, self.ttf_steps // 2)  # 3 (收敛更快)
+            v = nn.Parameter(self.embed[str(k)].data.clone())
+            n_steps = 1
 
         # 正则参考: 已知类型嵌入的均值, 防止 v 偏离太远
         known_vecs = torch.stack([self.embed[str(t)].data

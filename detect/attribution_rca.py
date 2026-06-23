@@ -47,8 +47,16 @@ class EventCauseDetection(RootCauseDetectionBase):
             model = ColdStartTTF(**config_json)
         elif config_json['model'] == 'ERPP-LoRA':
             full_n = config_json.get('full_n_types', config_json['n_types'])
+            # 先加载标准 ERPP, 再用 SVD 分解得到 LoRA 结构
             model = ColdStartLoRA(n_types=full_n, **{k: v for k, v in config_json.items()
                                                       if k not in ('n_types', 'full_n_types')})
+            if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
+                ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
+                model.decompose_from(ckpt)
+                print('LoRA decomposition from ERPP checkpoint.')
+            self.model = model.to(torch.device(device))
+            self.device = device
+            return  # 跳过后续通用的 load_state_dict
 
         elif config_json['model'] == 'SPNPP':
             model = SemiParametricPointProcess(**config_json)

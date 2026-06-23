@@ -126,6 +126,10 @@ class EventCauseDetection(RootCauseDetectionBase):
 
         data_batch = self.events_df2tensor_batch(event_df)
 
+        # 触发 TTF: 用 category 模式做一次前向, 让冷启动类型微调
+        if hasattr(self.model, '_ttf_enabled') and self.model._ttf_enabled:
+            self.model.forward(data_batch, event_type='category', need_weights=False)
+
         # log_intensities_events.detach().cpu(), prior_log_intensities_events.detach().cpu()
 
         tr = TimeRecorder()

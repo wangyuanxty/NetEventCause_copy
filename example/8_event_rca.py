@@ -71,7 +71,10 @@ reset_dir(output_path)
 ckpt_path = args.ckpt_path
 
 if ckpt_path == 'None' or ckpt_path is None:
-    father_dir = "checkpoints/%s/%s/split_id=0/%s" % (args.dataset, args.kind, args.model)
+    ckpt_model = args.model
+    if ckpt_model in ('ERPP-TTF', 'ERPP-SVD'):
+        ckpt_model = 'ERPP'  # 推理时方案, 训练=标准ERPP
+    father_dir = "checkpoints/%s/%s/split_id=0/%s" % (args.dataset, args.kind, ckpt_model)
     ckpt_path = find_dir_until(father_dir, 'model.pt')
 
 else:

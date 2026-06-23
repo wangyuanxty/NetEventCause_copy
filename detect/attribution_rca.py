@@ -46,14 +46,19 @@ class EventCauseDetection(RootCauseDetectionBase):
         elif config_json['model'] == 'ERPP-TTF':
             model = ColdStartTTF(**config_json)
         elif config_json['model'] == 'ERPP-LoRA':
-            full_n = config_json.get('full_n_types', config_json['n_types'])
-            model = ColdStartSVD(n_types=full_n, **{k: v for k, v in config_json.items()
-                                                      if k not in ('n_types', 'full_n_types')})
-            # 推理时 SVD 分解: 标准训练 + 推理时降维
+        elif config_json['model'] == 'ERPP-SVD':
+            config_json['model'] = 'ERPP'
+            model = ColdStartSVD(**config_json)
+            config_json['model'] = 'ERPP-SVD'
             if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
                 ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
                 model.load_state_dict(ckpt, strict=False)
-                model.decompose_embeddings()
+            full_n = config_json.get('full_n_types', config_json['n_types'])
+            model.extend_type_num(full_n)
+            model._seen = set(range(config_json['n_types']))
+            model._ttf_enabled = True
+            model.decompose_embeddings()
+            print('SVD-TTF enabled (%d types).' % full_n)
             self.model = model.to(torch.device(device))
             self.device = device
             return

@@ -144,7 +144,7 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
         if device is None:
             device = self.get_model_device()
         e = torch.zeros(
-            event_seqs.size()[:2] + (self.embedding_dim,),
+            event_seqs.size()[:2] + (self.embedding_dim + 1,),
             device=device, dtype=torch.float
         )
         for k_str, c in self.embed.items():

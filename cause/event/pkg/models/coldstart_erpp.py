@@ -102,118 +102,43 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
 class ColdStartLoRA(ExplainableRecurrentPointProcess):
     """
-    低秩嵌入 + TTF.   v_k = W @ c_k.
-
-    训练: 同标准 ERPP (无低秩约束).  推理前调用 decompose_from(erpp_checkpoint)
-          对已训练嵌入做 SVD 分解得到 W 和 c_k, 之后 W 冻结, 冷启动只优化 c_k.
+    低秩 TTF: 标准 ERPP 训练, 推理时对已学嵌入做 SVD 分解出低秩基,
+    新类型在低秩空间做 TTF (16 维), 再映射回 64 维。
+    训练与 ERPP 完全一致, 不引入额外参数。
     """
 
     def __init__(self, rank: int = 16, ttf_steps: int = 5, ttf_lr: float = 0.01, **kwargs):
-        self.rank = rank
         super().__init__(**kwargs)
+        self.rank = rank
         self.ttf_steps = ttf_steps
         self.ttf_lr = ttf_lr
         self._seen: set[int] = set()
         self._ttf_done: set[int] = set()
         self._ttf_enabled: bool = False
-        self.W: nn.Parameter | None = None
+        self.W: torch.Tensor | None = None     # 推理时从已知嵌入 SVD 得到
+        self.c_buf: dict[str, torch.Tensor] = {}  # 已知类型的 c_k 缓存
 
-        # 训练阶段使用标准 embedding (d 维), 不暴露 LoRA 结构
-        self._decomposed = False
+    def mark_seen(self, types: set[int]):
+        self._seen |= types
 
-    def decompose_from(self, erpp_state_dict: dict):
-        """从标准 ERPP checkpoint 分解嵌入表: V ∈ R^{d×n} → W @ C."""
-        d = self.embedding_dim
-        # 提取所有已知类型的嵌入
-        n = len(erpp_state_dict) - sum('log_intensities_prior' in k for k in erpp_state_dict)
-        # 收集嵌入矩阵
-        vecs = []
-        for key in sorted(erpp_state_dict.keys(),
-                          key=lambda x: int(x) if x.isdigit() else -1):
-            if key.isdigit():
-                vecs.append(erpp_state_dict[key])
-        if not vecs:
+    def _build_lora_basis(self):
+        """SVD 分解已知类型嵌入表 → W, c_k. 只在首次 TTF 时调用一次."""
+        if self.W is not None:
             return
-        V = torch.stack(vecs, dim=1)  # [d, n]
+        device = self.get_model_device()
+        known = [t for t in range(self.current_n_types) if t in self._seen]
+        V = torch.stack([self.embed[str(t)].data for t in known], dim=0)  # [K, d]
         U, S, Vt = torch.linalg.svd(V.float(), full_matrices=False)
-        r = min(self.rank, len(S))
-        self.W = nn.Parameter(U[:, :r] @ torch.diag(S[:r]))   # [d, r]
-        # 将分解后的 c_k 填入 self.embed
-        for i, k in enumerate(sorted([k for k in erpp_state_dict if k.isdigit()],
-                                      key=int)):
-            self.embed[str(k)] = nn.Parameter(Vt[:r, i].clone())
-        # 同时复制 log_intensities_prior
-        for key in erpp_state_dict:
-            if 'log_intensities_prior' in key:
-                k = key.strip('log_intensities_prior')
-                if k in self.log_intensities_prior:
-                    self.log_intensities_prior[k].data.copy_(erpp_state_dict[key])
-        self._decomposed = True
-
-    def event_type2embedding(self, event_seqs, device=None):
-        """原版格式: [B, T, d+1], 第 0 列为时间戳, 第 1: 列为 W @ c_k."""
-        if device is None:
-            device = self.get_model_device()
-        embedding_seqs = []
-        for seq in event_seqs:
-            embedding_seqs.append(
-                torch.stack([
-                    torch.cat([
-                        torch.FloatTensor([t]).to(device),
-                        self.W @ self.embed[str(int(event_type))]
-                        if self._decomposed and int(event_type) < self.current_n_types
-                        else self.setdefault_embed(int(event_type), device),
-                    ])
-                    for t, event_type in seq
-                ], dim=0)
-            )
-        return torch.stack(embedding_seqs, dim=0)
-
-    def return_all_parameters(self, dim=1):
-        if not self._decomposed:
-            return super().return_all_parameters(dim)
-        cs = torch.stack([self.embed[str(t)] for t in range(self.current_n_types)], dim=1)
-        result = self.W @ cs
-        if dim == 0:
-            return result.T
-        return result
-
-    def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
-        """对新类型 k 做 LoRA-TTF: W 冻结, 只优化 c_k (r 维)."""
-        is_first = k not in self._ttf_done
-        self._ttf_done.add(k)
-
-        if is_first:
-            c = nn.Parameter(torch.randn(self.rank, device=device) * 0.02)
-            n_steps = self.ttf_steps
-        else:
-            c = nn.Parameter(self.embed[str(k)].data.clone())
-            n_steps = 1
-
-        opt = torch.optim.Adam([c], lr=self.ttf_lr)
-
-        self.eval()
-        for _ in range(n_steps):
-            orig_c = self.embed[str(k)].data.clone()
-            self.embed[str(k)].data = c.data
-
-            log_ints, _ = super().forward(event_seqs, need_weights=True, event_type='category')
-            mask_k = (event_seqs[:, :, 1].long() == k)
-            loss = -log_ints[:, :, k][mask_k].mean()
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            self.embed[str(k)].data = orig_c
-
-        self.embed[str(k)].data = c.detach()
-        return c.detach()
+        r = min(self.rank, len(known), len(S))
+        self.W = (U[:, :r] * S[:r].unsqueeze(0)).to(device)  # [K, r]
+        for i, t in enumerate(known):
+            self.c_buf[str(t)] = Vt[:r, i].to(device)  # [r]
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):
-        """每条序列独立 LoRA-TTF."""
+        """前向传播前对冷启动类型做低秩 TTF."""
         if self._ttf_enabled and event_type == 'category':
+            self._build_lora_basis()
             cold_k = [k for k in event_seqs[:, :, 1].long().unique().tolist()
                       if k not in self._seen and k < self.current_n_types]
             if cold_k:
@@ -223,16 +148,45 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
                     self.refine_c(event_seqs, k, dev)
         return super().forward(event_seqs, event_type, need_weights, target_type, device)
 
-    def update_event_type(self, event_type, device):
-        """训练阶段创建标准 d 维嵌入; 推理阶段创建 r 维 c_k."""
-        dim = self.rank if self._decomposed else self.embedding_dim
-        self.embed[str(event_type)] = nn.Parameter(torch.randn(dim, device=device) * 0.02)
-        self.log_intensities_prior[str(event_type)] = nn.Parameter(
-            torch.zeros(1, device=device), requires_grad=True)
-        self.max_type_index = max(int(event_type), self.max_type_index)
-        if self.optim is not None:
-            self.optim.add_param_group({'params': self.embed[str(event_type)]})
-            self.optim.add_param_group({'params': self.log_intensities_prior[str(event_type)]})
+    def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
+        """低秩 TTF: 优化 r 维 c, v = W @ c 映射回 d 维."""
+        r = self.W.size(1)
+        is_first = k not in self._ttf_done
+        self._ttf_done.add(k)
 
-    def mark_seen(self, types: set[int]):
-        self._seen |= types
+        if is_first:
+            c = nn.Parameter(torch.randn(r, device=device) * 0.02)
+            n_steps = self.ttf_steps
+        else:
+            c = nn.Parameter(self.c_buf.get(str(k), torch.randn(r, device=device) * 0.02))
+            n_steps = 1
+
+        known_vecs = torch.stack([self.embed[str(t)].data
+                                   for t in range(self.current_n_types)
+                                   if t in self._seen], dim=0)
+        v_prior = known_vecs.mean(dim=0) if len(known_vecs) > 0 else torch.zeros(self.embedding_dim, device=device)
+
+        opt = torch.optim.Adam([c], lr=self.ttf_lr)
+        self.eval()
+        for _ in range(n_steps):
+            v = self.W @ c  # [d]
+            orig = self.embed[str(k)].data.clone()
+            self.embed[str(k)].data = v
+
+            log_ints, _ = super().forward(event_seqs, need_weights=True, event_type='category')
+            mask_k = (event_seqs[:, :, 1].long() == k)
+            nll = -log_ints[:, :, k][mask_k].mean()
+            reg = ((v - v_prior).pow(2).sum()) * 0.01
+            loss = nll + reg
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            self.embed[str(k)].data = orig
+
+        # 持久化最终的 v
+        final_v = (self.W @ c).detach()
+        self.embed[str(k)].data = final_v
+        self.c_buf[str(k)] = c.detach()
+        return final_v

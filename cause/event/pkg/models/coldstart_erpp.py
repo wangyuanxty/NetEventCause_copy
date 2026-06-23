@@ -143,16 +143,17 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
         """v_k = W @ c_k. 返回 [B, T, d+1], 第 0 列占位, 1: 为嵌入."""
         if device is None:
             device = self.get_model_device()
-        B, T = event_seqs.size()[:2]
-        e = torch.zeros(B, T, self.embedding_dim + 1,
+        e = torch.zeros(*event_seqs.shape[:2], self.embedding_dim + 1,
                          device=device, dtype=torch.float)
         for k_str, c in self.embed.items():
             k = int(k_str)
             mask = (event_seqs[:, :, 1].long() == k)
             if mask.any():
                 v = self.W @ c
-                n = mask.sum().item()
-                e[mask, 1:] = v.unsqueeze(0).expand(n, -1)
+                # 逐行赋值, 避免 expand 维度问题
+                idx = torch.where(mask)
+                for row, col in zip(idx[0].tolist(), idx[1].tolist()):
+                    e[row, col, 1:] = v
         return e
 
     def return_all_parameters(self, dim=1):

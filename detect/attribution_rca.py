@@ -7,10 +7,10 @@ import torch
 from utils import PROJECT_ROOT_PATH, TimeRecorder
 # from cause.event.pkg.models
 
-from cause.event.pkg.models.ode_rnn import ODERecurrentPointProcess
+# from cause.event.pkg.models.ode_rnn import ODERecurrentPointProcess
 # from cause.event.pkg.models.rnn import ExplainableRecurrentPointProcess
 from cause.event.pkg.models.rnn import ExplainableRecurrentPointProcess
-from cause.event.pkg.models.spnpp import SemiParametricPointProcess
+# from cause.event.pkg.models.spnpp import SemiParametricPointProcess
 # from cause.compress.rules import CompressRule
 from .root_cause_analysys_base import RootCauseDetectionBase
 import numpy as np
@@ -38,8 +38,17 @@ class EventCauseDetection(RootCauseDetectionBase):
         for k, v in (updated_args_dict if updated_args_dict else {}).items():
             config_json[k] = v
 
+        from cause.event.pkg.models.coldstart_erpp import ColdStartTTF, ColdStartLoRA
+
         if config_json['model'] == 'ERPP':
             model = ExplainableRecurrentPointProcess(**config_json)
+
+        elif config_json['model'] == 'ERPP-TTF':
+            model = ColdStartTTF(**config_json)
+        elif config_json['model'] == 'ERPP-LoRA':
+            full_n = config_json.get('full_n_types', config_json['n_types'])
+            model = ColdStartLoRA(n_types=full_n, **{k: v for k, v in config_json.items()
+                                                      if k not in ('n_types', 'full_n_types')})
 
         elif config_json['model'] == 'SPNPP':
             model = SemiParametricPointProcess(**config_json)
@@ -50,10 +59,15 @@ class EventCauseDetection(RootCauseDetectionBase):
             raise NotImplementedError()
 
         if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
-            model.load_state_dict(
-                torch.load(os.path.join(ckpt_path, 'model.pt'))
-            )
-            print('Loading parameters successfully.')
+            ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
+            model.load_state_dict(ckpt, strict=False)
+            full_n = config_json.get('full_n_types', config_json['n_types'])
+            model.extend_type_num(full_n)
+            if hasattr(model, '_seen'):
+                model._seen = set(range(config_json['n_types']))
+                model._ttf_enabled = True  # 开启 RCA 推理时的 TTF
+            print('Loading parameters successfully (%d -> %d types).' %
+                  (config_json['n_types'], full_n))
         else:
             print('There is no model.pt in %s' % ckpt_path)
         self.model = model.to(torch.device(device))

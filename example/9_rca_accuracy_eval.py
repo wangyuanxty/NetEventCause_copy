@@ -31,7 +31,7 @@ parser.add_argument('--algorithm', type=str, default=None, help='If not None, on
                                                                 'Otherwise, evaluate all algorithms in the output directory.')
 parser.add_argument('--output_dir', type=str, default='root_alarms_identification')
 parser.add_argument('--kind', type=str, default='ggem-1K-5')
-parser.add_argument('--eval_cnt', type=int, default=10)
+parser.add_argument('--eval_cnt', type=int, default=100)
 
 parser.add_argument('--fill_missing', action='store_true', help='通过命令行中加入--fill_missing开启，只适用于评估频繁项挖掘算法的结果')
 
@@ -173,6 +173,55 @@ for algorithm in os.listdir(outputs_dir):
 
     acc_all = acc_k(ground_truth_df, detected_df, k=5, only_derivative=False)
     func(acc_all, 'All', result)
+
+    # ── 按类型分组评估 ──
+    if 'type' in ground_truth_df.columns:
+        type_col = ground_truth_df['type']
+        all_types = sorted(type_col.unique())
+        n_total = len(all_types)
+        n_cold = 2  # 最后两个是冷启动类型
+        known_types = all_types[:n_total - n_cold]
+        cold_types  = all_types[n_total - n_cold:]
+
+        for group_name, type_list in [('Known(A~E)', known_types), ('Cold(F,G)', cold_types)]:
+            mask = type_col.isin(type_list)
+            gt_df_k = ground_truth_df[mask]
+            det_df_k = detected_df[mask]
+            if len(gt_df_k) == 0:
+                continue
+
+            print(f'\n--- {group_name} (types {list(type_list)}) ---')
+
+            # Root AUC
+            root_col = 'label_root_alarm'
+            prob_col = 'modified_root_prob'
+            if root_col in gt_df_k.columns and prob_col in det_df_k.columns:
+                auc_k = roc_auc_score(gt_df_k[root_col], det_df_k[prob_col])
+                print(f'Root AUC: {auc_k:.3f}')
+
+            # ACC@K for derivatives
+            acc_k_types = acc_k(gt_df_k, det_df_k, k=5, only_derivative=True)
+            for i in range(1, 6):
+                print(f'AC@{i}: {acc_k_types[i-1]:.3f}', end='  ')
+            print()
+
+            # 每个冷启动类型单独看
+            if group_name == 'Cold(F,G)':
+                for t in type_list:
+                    mask_t = type_col == t
+                    gt_df_t = ground_truth_df[mask_t]
+                    det_df_t = detected_df[mask_t]
+                    if len(gt_df_t) == 0:
+                        continue
+                    label = 'F(root)' if t == 5 else 'G(deriv)'
+                    print(f'  Type {int(t)} {label}:')
+                    if root_col in gt_df_t.columns and prob_col in det_df_t.columns:
+                        auc_t = roc_auc_score(gt_df_t[root_col], det_df_t[prob_col])
+                        print(f'    Root AUC: {auc_t:.3f}')
+                    acc_t = acc_k(gt_df_t, det_df_t, k=5, only_derivative=True)
+                    for i in range(1, 6):
+                        print(f'    AC@{i}: {acc_t[i-1]:.3f}', end='  ')
+                    print()
 
     print('-' * 21)
     all_results.append(result)

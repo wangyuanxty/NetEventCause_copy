@@ -7,3 +7,14 @@ ggem-1K-5:
         4: 1.00
         default: 1.0
 
+coldstart-7:
+    root_alarm_ratio:
+        0: 1.00
+        1: 0.63
+        2: 0.21
+        3: 0.45
+        4: 1.00
+        5: 1.00
+        6: 0.45
+        default: 1.0
+

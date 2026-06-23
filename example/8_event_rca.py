@@ -1,6 +1,7 @@
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 try:
     from base import *
@@ -39,6 +40,8 @@ parser.add_argument('--suffix', type=str, default='')
 parser.add_argument('--do_compress', type=bool, default=True)
 parser.add_argument('--manual_rule', action='store_true', help='是否添加手工规则以矫正因果得分和根告警识别概率')
 # parser.add_argument('--fill_missing', action='store_true', help='通过命令行中加入--fill_missing开启，只适用于评估频繁项挖掘算法的结果')
+parser.add_argument('--max_seqs', type=int, default=0,
+                    help='max test sequences to process (0=all)')
 parser.add_argument('--save_all', type=bool, default=False)
 parser.add_argument('--output_dir', type=str, default='root_alarms_identification')
 parser.add_argument('--add_label_cols', type=bool, default=False)
@@ -111,9 +114,12 @@ else:
 #             os.path.join(output_path, file.split(os.sep)[-1])
 #         )
 # else:
-data_path = os.path.join('cache', args.dataset, 'dataset', args.kind, 'data.npz')
-data = np.load(data_path, allow_pickle=True)
-test_event_seqs = data["event_seqs"][data["train_test_splits"][0][1]]
+import pickle
+data_path = os.path.join('cache', args.dataset, 'dataset', args.kind, 'data.pkl')
+with open(data_path, "rb") as f:
+    data = pickle.load(f)
+test_idx = data["train_test_splits"][0][1]
+test_event_seqs = [data["event_seqs"][i] for i in test_idx]
 
 # print的内容不仅输出到终端，还能打印到某个文件
 from utils.tee import Tee
@@ -121,7 +127,11 @@ logfile = open(os.path.join(output_path, 'rca.log'), 'w')
 sys.stdout = Tee(sys.stdout, logfile)
 
 
-for i, test_event_seq in enumerate(test_event_seqs):
+max_seqs = getattr(args, 'max_seqs', 0)
+if max_seqs > 0:
+    test_event_seqs = test_event_seqs[:max_seqs]
+
+for i, test_event_seq in enumerate(tqdm(test_event_seqs, desc="RCA")):
     df = pd.DataFrame(test_event_seq, columns=['t', 'type', 'label-root-1'])
     # setting the value of column root_alarm as True if the label-root-1 is -1, else False
     df['label_root_alarm'] = df['label-root-1'].apply(lambda x: True if x == -1 else False)

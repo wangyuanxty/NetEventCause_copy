@@ -154,7 +154,7 @@ with Timer("Simulating events"):
     for i in tqdm(range(args.n_seqs)):
         seq = model.simulate(0, args.max_t)
         event_seqs.append(seq)
-event_seqs = np.asarray(event_seqs)
+event_seqs = [np.array(seq) for seq in event_seqs]  # each → [N,3] array
 
 dataset = f"{args.name}-{args.n_seqs // 1000}K-{n_types}"
 output_path = f"cache/toy/dataset/{dataset}"
@@ -174,13 +174,17 @@ train_test_splits = list(
 # For visualization
 pd.DataFrame(event_seqs[0], columns=['t', 'type', 'cause']).to_csv(osp.join(output_path, 'seq_demo.csv'))
 
-np.savez_compressed(
-    osp.join(output_path, "data.npz"),
-    event_seqs=event_seqs,
-    train_test_splits=train_test_splits,
-    n_types=n_types,
-)
+
+import pickle
+with open(osp.join(output_path, "data.pkl"), "wb") as f:
+    pickle.dump({
+        "event_seqs": event_seqs,
+        "train_test_splits": train_test_splits,
+        "n_types": n_types,
+    }, f)
+
 np.savetxt(osp.join(output_path, "infectivity.txt"), adjacency)
+
 
 # evaluate
 results = []

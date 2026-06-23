@@ -40,15 +40,15 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):
-        """前向传播前自动对冷启动类型做 TTF（仅 _ttf_enabled=True 且 category 模式时触发）"""
+        """每条序列独立 TTF: 不同序列 → 不同上下文 → 不同 v."""
         if self._ttf_enabled and event_type == 'category':
-            batch_k = event_seqs[:, :, 1].long().unique().tolist()
-            cold_k = [k for k in batch_k if k not in self._seen and k < self.current_n_types]
+            cold_k = [k for k in event_seqs[:, :, 1].long().unique().tolist()
+                      if k not in self._seen and k < self.current_n_types]
             if cold_k:
                 dev = event_seqs.device
+                self._ttf_done.clear()  # 新序列, 重新开始
                 for k in cold_k:
                     self.refine_v(event_seqs, k, dev)
-                self._seen |= set(cold_k)
         return super().forward(event_seqs, event_type, need_weights, target_type, device)
 
     def refine_v(self, event_seqs: torch.Tensor, k: int, device: torch.device):
@@ -115,15 +115,15 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):
-        """前向传播前自动对冷启动类型做 LoRA-TTF（仅 _ttf_enabled=True 且 category 模式时触发）"""
+        """每条序列独立 LoRA-TTF: 不同序列 → 不同上下文 → 不同 v."""
         if self._ttf_enabled and event_type == 'category':
-            batch_k = event_seqs[:, :, 1].long().unique().tolist()
-            cold_k = [k for k in batch_k if k not in self._seen and k < self.current_n_types]
+            cold_k = [k for k in event_seqs[:, :, 1].long().unique().tolist()
+                      if k not in self._seen and k < self.current_n_types]
             if cold_k:
                 dev = event_seqs.device
+                self._ttf_done.clear()
                 for k in cold_k:
                     self.refine_c(event_seqs, k, dev)
-                self._seen |= set(cold_k)
         return super().forward(event_seqs, event_type, need_weights, target_type, device)
 
     def update_event_type(self, event_type, device):

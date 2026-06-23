@@ -63,10 +63,10 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
         if is_first:
             v = nn.Parameter(torch.randn(d, device=device) * 0.02)
-            n_steps = self.ttf_steps
+            n_steps = self.ttf_steps       # 5
         else:
-            v = nn.Parameter(self.embed[str(k)].data.clone())
-            n_steps = 1
+            v = nn.Parameter(torch.randn(d, device=device) * 0.02)
+            n_steps = max(3, self.ttf_steps // 2)  # 3 (收敛更快)
 
         # 正则参考: 已知类型嵌入的均值, 防止 v 偏离太远
         known_vecs = torch.stack([self.embed[str(t)].data

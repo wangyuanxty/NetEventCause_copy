@@ -122,7 +122,7 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
         self._seen |= types
 
     def _build_lora_basis(self):
-        """SVD 分解已知类型嵌入表 → W, c_k. 只在首次 TTF 时调用一次."""
+        """SVD 分解已知类型嵌入表 → W [d, r], c_k [r]."""
         if self.W is not None:
             return
         device = self.get_model_device()
@@ -130,10 +130,12 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
         V = torch.stack([self.embed[str(t)].data for t in known], dim=0)  # [K, d]
         U, S, Vt = torch.linalg.svd(V.float(), full_matrices=False)
         r = min(self.rank, len(known), len(S))
-        # V ≈ U[:,:r] @ diag(S[:r]) @ Vt[:r,:] → W = Vt[:r,:].T [d,r], c_k = diag(S) @ U[k,:r]^T [r]
-        self.W = Vt[:r, :].T.to(device)  # [d, r]
+        # W: Vt 的前 r 行转置 → [d, r], 每个列是 V 的基向量
+        self.W = Vt[:r, :].T.contiguous().to(device)  # [d, r]
+        # c_k: (U * S) 的前 r 列 → [r], 类型 k 在低秩空间的坐标
+        coeffs = (U[:, :r] * S[:r].unsqueeze(0))  # [K, r]
         for i, t in enumerate(known):
-            self.c_buf[str(t)] = (torch.diag(S[:r]) @ U[i, :r]).to(device)  # [r]
+            self.c_buf[str(t)] = coeffs[i].to(device)  # [r]
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):

@@ -23,7 +23,7 @@ from ..pkg.models.rnn import (
     EventSeqDataset,
     ExplainableRecurrentPointProcess,
 )
-from ..pkg.models.coldstart_erpp import ColdStartTTF, ColdStartLoRA
+from ..pkg.models.coldstart_erpp import ColdStartTTF, ColdStartSVD
 from ..pkg.models.rppn import RecurrentPointProcessNet
 from ..pkg.utils.argparser.training import add_subparser_arguments
 from ..pkg.utils.evaluation import eval_fns
@@ -50,7 +50,7 @@ def get_parser():
     subparsers = parser.add_subparsers(
         description="Supported models", dest="model"
     )
-    for model in ["ERPP", "ERPP-TTF", "ERPP-LoRA", "RPPN", "HExp", "HSG", "NPHC"]:
+    for model in ["ERPP", "ERPP-TTF", "ERPP-SVD", "RPPN", "HExp", "HSG", "NPHC"]:
         add_subparser_arguments(model, subparsers)
 
     return parser
@@ -62,8 +62,8 @@ def get_model(args, n_types):
         model = ExplainableRecurrentPointProcess(n_types=n_types, **kwargs)
     elif args.model == "ERPP-TTF":
         model = ColdStartTTF(n_types=n_types, **kwargs)
-    elif args.model == "ERPP-LoRA":
-        model = ColdStartLoRA(n_types=n_types, **kwargs)
+    elif args.model == "ERPP-SVD":
+        model = ColdStartSVD(n_types=n_types, **kwargs)
     elif args.model == "RPPN":
         model = RecurrentPointProcessNet(n_types=n_types, **kwargs)
     elif args.model == "HExp":
@@ -179,7 +179,7 @@ def train_nn_models(model, event_seqs, args):
 
 
 def eval_nll(model, event_seqs, args):
-    if args.model in ["ODERNN", "SPNPP", "RME", "ERPP", "ERPP-TTF", "ERPP-LoRA", "RPPN"]:
+    if args.model in ["ODERNN", "SPNPP", "RME", "ERPP", "ERPP-TTF", "ERPP-SVD", "RPPN"]:
 
         dataloader = DataLoader(
             EventSeqDataset(event_seqs), shuffle=False, **dataloader_args
@@ -205,7 +205,7 @@ def eval_nll(model, event_seqs, args):
 
 
 def predict_next_event(model, event_seqs, args):
-    if args.model in ["ODERNN", "SPNPP", "ERPP", "ERPP-TTF", "ERPP-LoRA", "RPPN"]:
+    if args.model in ["ODERNN", "SPNPP", "ERPP", "ERPP-TTF", "ERPP-SVD", "RPPN"]:
         dataloader = DataLoader(
             EventSeqDataset(event_seqs), shuffle=False, **dataloader_args
         )
@@ -228,7 +228,7 @@ def predict_next_event(model, event_seqs, args):
 
 def get_infectivity_matrix(model, event_seqs, args):
 
-    if args.model in ["RME", "ERPP", "ERPP-TTF", "ERPP-LoRA", "RPPN"]:
+    if args.model in ["RME", "ERPP", "ERPP-TTF", "ERPP-SVD", "RPPN"]:
         _dataloader_args = dataloader_args.copy()
         if "attr_batch_size" in args and args.attr_batch_size:
             _dataloader_args.update(batch_size=args.attr_batch_size)

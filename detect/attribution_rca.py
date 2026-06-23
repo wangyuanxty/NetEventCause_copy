@@ -38,7 +38,7 @@ class EventCauseDetection(RootCauseDetectionBase):
         for k, v in (updated_args_dict if updated_args_dict else {}).items():
             config_json[k] = v
 
-        from cause.event.pkg.models.coldstart_erpp import ColdStartTTF, ColdStartLoRA
+        from cause.event.pkg.models.coldstart_erpp import ColdStartTTF, ColdStartSVD
 
         if config_json['model'] == 'ERPP':
             model = ExplainableRecurrentPointProcess(**config_json)
@@ -46,24 +46,14 @@ class EventCauseDetection(RootCauseDetectionBase):
         elif config_json['model'] == 'ERPP-TTF':
             model = ColdStartTTF(**config_json)
         elif config_json['model'] == 'ERPP-LoRA':
-            config_json['model'] = 'ERPP'
-            model = ExplainableRecurrentPointProcess(**config_json)
-            config_json['model'] = 'ERPP-LoRA'
+            full_n = config_json.get('full_n_types', config_json['n_types'])
+            model = ColdStartSVD(n_types=full_n, **{k: v for k, v in config_json.items()
+                                                      if k not in ('n_types', 'full_n_types')})
+            # 推理时 SVD 分解: 标准训练 + 推理时降维
             if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
                 ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
                 model.load_state_dict(ckpt, strict=False)
-            full_n = config_json.get('full_n_types', config_json['n_types'])
-            model.extend_type_num(full_n)
-            model.__class__ = ColdStartLoRA
-            model.rank = config_json.get('rank', 16)
-            model.ttf_steps = config_json.get('ttf_steps', 5)
-            model.ttf_lr = config_json.get('ttf_lr', 0.01)
-            model._seen = set(range(config_json['n_types']))
-            model._ttf_done = set()
-            model._ttf_enabled = True
-            model.W = None
-            print('LoRA-TTF enabled (inference-only, %d -> %d types).' %
-                  (config_json['n_types'], full_n))
+                model.decompose_embeddings()
             self.model = model.to(torch.device(device))
             self.device = device
             return

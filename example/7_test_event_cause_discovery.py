@@ -141,7 +141,7 @@ if __name__ == "__main__":
 
             model.extend_type_num(train_n_types)
 
-        if args.model in ["ODE-RNN", "SPNPP", "RME", "ERPP", "ERPP-TTF", "ERPP-LoRA", "RPPN"]:
+        if args.model in ["ODE-RNN", "SPNPP", "RME", "ERPP", "ERPP-TTF", "ERPP-SVD", "RPPN"]:
             train.dataloader_args = {
                 "batch_size": args.batch_size,
                 "collate_fn": EventSeqDataset.collate_fn,

@@ -50,24 +50,24 @@ $$
 
 其效果取决于上下文强度：若 $h(t^-)$ 中编码了强因果信号（如 G 出现在 C 之后），NLL 梯度远超正则拉力，$v$ 被推离 $\bar{v}$，模型判定为 Derivative；若上下文无关联信号（如 F 独立出现），正则项主导，$v$ 保持在 $\bar{v}$ 附近，输出接近先验强度的 $\lambda$，模型判定为 Root。
 
-### 方案 B：LoRA-TTF — 低秩分解 + 测试时微调
+### 方案 B：SVD-TTF — 推理时 SVD 分解 + 低秩微调
 
-将嵌入表分解为低秩形式以加速收敛：
+训练完全不变（标准 ERPP），仅在推理时对训练好的嵌入做 SVD 分解，将 64 维嵌入表拆分为低秩形式：
 
 $$
-v_k = W \cdot c_k, \quad W \in \mathbb{R}^{d \times r}, \ c_k \in \mathbb{R}^{r}
+V \approx W \cdot C, \quad W \in \mathbb{R}^{d \times r}, \ C \in \mathbb{R}^{r \times N}
 $$
 
-其中 $r=8 \ll d=64$。训练时 $W$ 和已知 $c_k$ 联合学习；推理时 $W$ 冻结，仅优化 $c_k$（8 维）。相比直接优化 64 维的 $v$，收敛速度快约 $8\times$，梯度方向更集中。
+其中 $r=8$。已知类型用 $W \cdot c_k$ 重建，新类型冻结 $W$，仅优化 $c_k$（8 维）。TTH 的收敛速度与 LoRA 相同，但训练质量不受影响。
 
 ### 方案对比
 
-| | TTF | LoRA-TTF |
+| | TTF | SVD-TTF |
 |---|---|---|
 | 嵌入形式 | $v_k \in \mathbb{R}^{64}$ 各自独立 | $v_k = W \cdot c_k,\ c_k \in \mathbb{R}^8$ |
 | 新类型优化维度 | 64 | 8 |
 | $W$ 是否共享 | — | 是，所有类型共享 |
-| 训练改动 | 无 | embedding 改为 $W \cdot c$ |
+| 训练改动 | 无 | 无（推理时 SVD 分解） |
 | 模型名 | `ERPP-TTF` | `ERPP-LoRA` |
 
 ---
@@ -116,7 +116,7 @@ python example/8_event_rca.py --dataset toy --kind coldstart-7 --model ERPP-TTF 
 # 4. 评估
 python example/9_rca_accuracy_eval.py --algorithm event_cause-ERPP-TTF --kind coldstart-7
 
-# LoRA-TTF 同理，替换模型名为 ERPP-LoRA
+# SVD-TTF 同理，替换模型名为 ERPP-LoRA
 ```
 
 ---

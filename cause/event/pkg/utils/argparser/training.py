@@ -94,7 +94,7 @@ def add_subparser_arguments(model, subparsers):
         sub_parser.add_argument(
             "--tune_metric", type=str, default="nll", help="default: nll"
         )
-    elif model in ("ERPP", "SPNPP", "ERPP-TTF", "ERPP-LoRA"):
+    elif model in ("ERPP", "SPNPP", "ERPP-TTF", "ERPP-SVD"):
         # add sub-parsers for each individual model
         sub_parser = subparsers.add_parser(
             model, help="Explainable Recurrent Point Process"

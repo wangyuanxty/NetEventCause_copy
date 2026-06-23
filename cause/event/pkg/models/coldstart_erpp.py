@@ -33,6 +33,7 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         self.ttf_lr = ttf_lr
         self._seen: set[int] = set()
         self._ttf_done: set[int] = set()
+        self._ttf_count: dict[int, int] = {}   # 各类型 TTF 次数
         self._ttf_enabled: bool = False  # RCA 推理时设为 True
 
     def mark_seen(self, types: set[int]):
@@ -56,8 +57,9 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         event_seqs: [1, T, 2]
         """
         d = self.embedding_dim
-        is_first = k not in self._ttf_done
-        self._ttf_done.add(k)
+        cnt = self._ttf_count.get(k, 0)
+        is_first = cnt < 3
+        self._ttf_count[k] = cnt + 1
 
         if is_first:
             v = nn.Parameter(torch.randn(d, device=device) * 0.02)

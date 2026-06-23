@@ -189,33 +189,55 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
         return result  # [d, n]
 
     def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
-        """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维)."""
+        """
+        两阶段微调:
+          Stage 1: 在 SVD 子空间优化 c_k (r 维), 收敛快
+          Stage 2: 展开 v=W@c, 在全空间优化 v (d 维), 覆盖子空间外的模式
+        """
+        d = self.embedding_dim
         is_first = k not in self._ttf_done
         self._ttf_done.add(k)
 
-        if is_first:
-            c = nn.Parameter(torch.randn(self.rank, device=device) * 0.02)
-            n_steps = self.ttf_steps
-        else:
-            c = nn.Parameter(self.embed[str(k)].data.clone())
-            n_steps = 1
-
-        opt = torch.optim.Adam([c], lr=self.ttf_lr)
-
         self.eval()
-        for _ in range(n_steps):
-            orig_c = self.embed[str(k)].data.clone()
-            self.embed[str(k)].data = c.data
+        if is_first:
+            # Stage 1: 子空间优化 (r 维, 3 步)
+            c = nn.Parameter(torch.randn(self.rank, device=device) * 0.02)
+            opt_c = torch.optim.Adam([c], lr=self.ttf_lr)
+            for _ in range(3):
+                orig_c = self.embed[str(k)].data.clone()
+                self.embed[str(k)].data = c.data
+                log_ints, _ = super().forward(event_seqs, need_weights=True, event_type='category')
+                mask_k = (event_seqs[:, :, 1].long() == k)
+                loss = -log_ints[:, :, k][mask_k].mean()
+                opt_c.zero_grad(); loss.backward(); opt_c.step()
+                self.embed[str(k)].data = orig_c
 
+            # Stage 2: 全空间优化 (d 维, 2 步), 从 W@c 初始化
+            v = nn.Parameter((self.W @ c.detach()).clone())
+            opt_v = torch.optim.Adam([v], lr=self.ttf_lr * 0.5)
+            with torch.no_grad():
+                self.embed[str(k)] = nn.Parameter(torch.randn(d, device=device) * 0.02)
+            for _ in range(2):
+                orig_v = self.embed[str(k)].data.clone()
+                self.embed[str(k)].data = v.data
+                log_ints, _ = super().forward(event_seqs, need_weights=True, event_type='category')
+                mask_k = (event_seqs[:, :, 1].long() == k)
+                loss = -log_ints[:, :, k][mask_k].mean()
+                opt_v.zero_grad(); loss.backward(); opt_v.step()
+                self.embed[str(k)].data = orig_v
+
+            self.embed[str(k)].data = v.detach()
+            return v.detach()
+        else:
+            # 后续出现: 全空间 1 步微调
+            v = nn.Parameter(self.embed[str(k)].data.clone())
+            opt_v = torch.optim.Adam([v], lr=self.ttf_lr * 0.5)
+            orig_v = self.embed[str(k)].data.clone()
+            self.embed[str(k)].data = v.data
             log_ints, _ = super().forward(event_seqs, need_weights=True, event_type='category')
             mask_k = (event_seqs[:, :, 1].long() == k)
             loss = -log_ints[:, :, k][mask_k].mean()
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            self.embed[str(k)].data = orig_c
-
-        self.embed[str(k)].data = c.detach()
-        return c.detach()
+            opt_v.zero_grad(); loss.backward(); opt_v.step()
+            self.embed[str(k)].data = orig_v
+            self.embed[str(k)].data = v.detach()
+            return v.detach()

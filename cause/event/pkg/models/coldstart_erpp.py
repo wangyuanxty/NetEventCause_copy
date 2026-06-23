@@ -116,6 +116,7 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
         self.rank = rank
         self.ttf_steps = ttf_steps
         self.ttf_lr = ttf_lr
+        self._ttf_count: dict[int, int] = {}
         self._seen: set[int] = set()
         self._ttf_done: set[int] = set()
         self._ttf_enabled: bool = False
@@ -193,9 +194,12 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
         return result  # [d, n]
 
     def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
-        """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维)."""
-        is_first = k not in self._ttf_done
-        self._ttf_done.add(k)
+        """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维). 前20次5步, 后续不微调."""
+        cnt = self._ttf_count.get(k, 0)
+        is_first = cnt < 20
+        self._ttf_count[k] = cnt + 1
+        if cnt >= 20:
+            return
 
         if is_first:
             c = nn.Parameter(torch.randn(self.rank, device=device) * 0.02)

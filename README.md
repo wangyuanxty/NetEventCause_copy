@@ -4,6 +4,8 @@
 
 原始项目地址：https://github.com/yuanzhaolin/NetEventCause
 
+> **关于可复现性**：由于华为技术隐私协议要求，原论文中的 IMOC 真实数据集及部分模型代码（ODE-RNN、SPNPP）已被删除或替换。因此本仓库无法完全复现原论文 Table III/IV 的指标。基于同样原因，训练阶段的 NLL 收敛曲线与原论文存在差距。冷启动实验的评估标准调整为：**冷启动类型（F、G）的 ACC@K 和 Root AUC 高于随机预测即证明方案有效**。
+
 ---
 
 ## 环境配置

@@ -8,23 +8,6 @@
 
 ---
 
-## 环境配置
-
-```shell
-conda env create -n <myenv> -f config/environment.yml
-conda activate <myenv>
-```
-
-原论文的训练与评估流程：
-
-```shell
-./scripts/toy_all.sh
-```
-
-> 注：由于华为技术隐私协议要求，部分源代码已被替换。
-
----
-
 ## 1. 开放问题
 
 论文 Section VI 明确指出：

@@ -27,14 +27,19 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
       后续出现 → 当前 v → 1 步梯度下降（累积信息）
     """
 
-    def __init__(self, ttf_steps: int = 5, ttf_lr: float = 0.01, **kwargs):
+    def __init__(self, ttf_steps: int = 5, ttf_lr: float = 0.01,
+                 ttf_mode: str = 'v', **kwargs):
+        """
+        ttf_mode: 'v' (仅微调嵌入), 'v+decoder' (微调嵌入+shallow_net)
+        """
         super().__init__(**kwargs)
         self.ttf_steps = ttf_steps
         self.ttf_lr = ttf_lr
+        self.ttf_mode = ttf_mode
         self._seen: set[int] = set()
         self._ttf_done: set[int] = set()
-        self._ttf_count: dict[int, int] = {}   # 各类型 TTF 次数
-        self._ttf_enabled: bool = False  # RCA 推理时设为 True
+        self._ttf_count: dict[int, int] = {}
+        self._ttf_enabled: bool = False
 
     def mark_seen(self, types: set[int]):
         self._seen |= types
@@ -73,7 +78,13 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
                                    if t in self._seen], dim=0)
         v_prior = known_vecs.mean(dim=0) if len(known_vecs) > 0 else torch.zeros(d, device=device)
 
-        opt = torch.optim.Adam([v], lr=self.ttf_lr)
+        params = [v]
+        if self.ttf_mode == 'v+decoder':
+            params += list(self.shallow_net.parameters())
+        opt = torch.optim.Adam(params, lr=self.ttf_lr)
+        sd_backup: dict[str, torch.Tensor] = {}
+        if self.ttf_mode == 'v+decoder':
+            sd_backup = {n: p.data.clone() for n, p in self.shallow_net.named_parameters()}
 
         self.eval()
         for s in range(n_steps):
@@ -92,6 +103,9 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
             print(f"  [TTF] type={k} step={s+1}/{n_steps} nll={nll.item():.3f} reg={reg.item():.4f}")
 
             self.embed[str(k)].data = orig
+            if sd_backup:
+                for n, p in self.shallow_net.named_parameters():
+                    p.data = sd_backup[n]
 
         self.embed[str(k)].data = v.detach()
         return v.detach()

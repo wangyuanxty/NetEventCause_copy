@@ -76,7 +76,7 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         opt = torch.optim.Adam([v], lr=self.ttf_lr)
 
         self.eval()
-        for _ in range(n_steps):
+        for s in range(n_steps):
             orig = self.embed[str(k)].data.clone()
             self.embed[str(k)].data = v.data
 

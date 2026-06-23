@@ -130,9 +130,10 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
         V = torch.stack([self.embed[str(t)].data for t in known], dim=0)  # [K, d]
         U, S, Vt = torch.linalg.svd(V.float(), full_matrices=False)
         r = min(self.rank, len(known), len(S))
-        self.W = (U[:, :r] * S[:r].unsqueeze(0)).to(device)  # [K, r]
+        # V ≈ U[:,:r] @ diag(S[:r]) @ Vt[:r,:] → W = Vt[:r,:].T [d,r], c_k = diag(S) @ U[k,:r]^T [r]
+        self.W = Vt[:r, :].T.to(device)  # [d, r]
         for i, t in enumerate(known):
-            self.c_buf[str(t)] = Vt[:r, i].to(device)  # [r]
+            self.c_buf[str(t)] = (torch.diag(S[:r]) @ U[i, :r]).to(device)  # [r]
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):

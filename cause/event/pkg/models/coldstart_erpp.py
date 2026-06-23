@@ -89,8 +89,7 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
             opt.zero_grad()
             loss.backward()
             opt.step()
-            if s == 0 or s == n_steps - 1:
-                print(f"  [TTF] type={k} step={s+1}/{n_steps} nll={nll.item():.3f} reg={reg.item():.4f}")
+            print(f"  [TTF] type={k} step={s+1}/{n_steps} nll={nll.item():.3f} reg={reg.item():.4f}")
 
             self.embed[str(k)].data = orig
 

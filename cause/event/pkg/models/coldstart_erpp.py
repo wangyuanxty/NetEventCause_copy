@@ -40,8 +40,8 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):
-        """前向传播前自动对冷启动类型做 TTF（仅 _ttf_enabled=True 时触发）"""
-        if self._ttf_enabled:
+        """前向传播前自动对冷启动类型做 TTF（仅 _ttf_enabled=True 且 category 模式时触发）"""
+        if self._ttf_enabled and event_type == 'category':
             batch_k = event_seqs[:, :, 1].long().unique().tolist()
             cold_k = [k for k in batch_k if k not in self._seen and k < self.current_n_types]
             if cold_k:
@@ -115,8 +115,8 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
 
     def forward(self, event_seqs, event_type='category',
                 need_weights=True, target_type=-1, device=None):
-        """前向传播前自动对冷启动类型做 LoRA-TTF（仅 _ttf_enabled=True 时触发）"""
-        if self._ttf_enabled:
+        """前向传播前自动对冷启动类型做 LoRA-TTF（仅 _ttf_enabled=True 且 category 模式时触发）"""
+        if self._ttf_enabled and event_type == 'category':
             batch_k = event_seqs[:, :, 1].long().unique().tolist()
             cold_k = [k for k in batch_k if k not in self._seen and k < self.current_n_types]
             if cold_k:

@@ -45,7 +45,6 @@ class EventCauseDetection(RootCauseDetectionBase):
 
         elif config_json['model'] == 'ERPP-TTF':
             model = ColdStartTTF(**config_json)
-        elif config_json['model'] == 'ERPP-LoRA':
         elif config_json['model'] == 'ERPP-SVD':
             config_json['model'] = 'ERPP'
             model = ColdStartSVD(**config_json)

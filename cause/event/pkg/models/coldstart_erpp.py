@@ -151,8 +151,8 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
             k = int(k_str)
             mask = (event_seqs[:, :, 1].long() == k)
             if mask.any():
-                v = (self.W @ c).unsqueeze(0).unsqueeze(0)
-                e[mask] = v.expand(mask.sum(), self.embedding_dim)
+                v = self.W @ c  # [d]
+                e[mask] = v.unsqueeze(0).expand(mask.sum(), -1)
         return e
 
     def return_all_parameters(self, dim=1):

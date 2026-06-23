@@ -140,21 +140,25 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
             self.optim.add_param_group({'params': self.embed[str(event_type)]})
 
     def event_type2embedding(self, event_seqs, device=None):
-        """v_k = W @ c_k. 返回 [B, T, d+1], 第 0 列占位, 1: 为嵌入."""
+        """原版格式: [B, T, d+1], 第 0 列为时间戳, 第 1: 列为 W @ c_k."""
         if device is None:
             device = self.get_model_device()
-        e = torch.zeros(*event_seqs.shape[:2], self.embedding_dim + 1,
-                         device=device, dtype=torch.float)
-        for k_str, c in self.embed.items():
-            k = int(k_str)
-            mask = (event_seqs[:, :, 1].long() == k)
-            if mask.any():
-                v = self.W @ c
-                # 逐行赋值, 避免 expand 维度问题
-                idx = torch.where(mask)
-                for row, col in zip(idx[0].tolist(), idx[1].tolist()):
-                    e[row, col, 1:] = v
-        return e
+        embedding_seqs = []
+        for seq in event_seqs:
+            embedding_seqs.append(
+                torch.stack([
+                    torch.cat([
+                        torch.FloatTensor([t]).to(device),
+                        self.W @ self.setdefault_embed(int(event_type), device),
+                    ]) if int(event_type) < self.current_n_types else
+                    torch.cat([
+                        torch.FloatTensor([t]).to(device),
+                        torch.zeros(self.embedding_dim, device=device),
+                    ])
+                    for t, event_type in seq
+                ], dim=0)
+            )
+        return torch.stack(embedding_seqs, dim=0)
 
     def return_all_parameters(self, dim=1):
         device = self.W.device

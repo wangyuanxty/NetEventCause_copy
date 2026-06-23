@@ -65,6 +65,7 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         cnt = self._ttf_count.get(k, 0)
         self._ttf_count[k] = cnt + 1
         if cnt >= 10:
+            return  # 已充分微调
             return
 
         if cnt == 0:
@@ -209,6 +210,7 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
         cnt = self._ttf_count.get(k, 0)
         self._ttf_count[k] = cnt + 1
         if cnt >= 10:
+            return  # 已充分微调
             return
 
         if cnt == 0:

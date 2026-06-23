@@ -172,9 +172,10 @@ class EventCauseDetection(RootCauseDetectionBase):
 
             root_cause_rank = sorted(root_cause_rank, reverse=True)
 
-            # 冷启动类型: Cause 用嵌入相似度 (不用 IG)
+            # 冷启动类型 Cause 辅助: IG 弱时用嵌入相似度
             current_type = int(event_df.iloc[i]['type'])
             if hasattr(self.model, '_seen') and current_type not in self.model._seen:
+                # IG 找不到 cause → 用嵌入相似度
                 v_cur = self.model.embed[str(current_type)].data
                 sim_scores = []
                 for k in range(i):
@@ -183,7 +184,12 @@ class EventCauseDetection(RootCauseDetectionBase):
                     sim = torch.cosine_similarity(v_cur.unsqueeze(0), v_past.unsqueeze(0), dim=-1).item()
                     sim_scores.append((sim, k))
                 sim_scores.sort(reverse=True)
-                root_cause_rank = [(s * 10.0, idx) for s, idx in sim_scores[:5] if s > 0]
+                ig_scores = {idx: score for score, idx in root_cause_rank}
+                # 混合: IG + 嵌入相似度, 取并集排序
+                combined = {}
+                for sim, idx in sim_scores[:10]:
+                    combined[idx] = sim * 5.0 + ig_scores.get(idx, 0.0)
+                root_cause_rank = sorted([(v, k) for k, v in combined.items()], reverse=True)[:5]
 
             causative_alarms = [event_df.iloc[i] for _, i in root_cause_rank[:5]]
 

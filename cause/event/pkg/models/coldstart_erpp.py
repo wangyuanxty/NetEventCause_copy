@@ -62,10 +62,9 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
 
         if cnt == 0:
             v = nn.Parameter(torch.randn(d, device=device) * 0.02)
-            n_steps = 5
         else:
             v = nn.Parameter(self.embed[str(k)].data.clone())
-            n_steps = 1
+        n_steps = 1
 
         known_vecs = torch.stack([self.embed[str(t)].data
                                    for t in range(self.current_n_types)
@@ -190,17 +189,15 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
         return result  # [d, n]
 
     def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
-        """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维). 前20次5步, 后续不微调."""
+        """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维). 每次1步累积."""
         cnt = self._ttf_count.get(k, 0)
         self._ttf_count[k] = cnt + 1
-        if cnt >= 50:
-            return
 
         if cnt == 0:
             c = nn.Parameter(torch.randn(self.rank, device=device) * 0.02)
         else:
             c = nn.Parameter(self.embed[str(k)].data.clone())
-        n_steps = self.ttf_steps
+        n_steps = 1
 
         opt = torch.optim.Adam([c], lr=self.ttf_lr)
 

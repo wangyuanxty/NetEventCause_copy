@@ -50,10 +50,8 @@ def get_parser():
     parser = argparse.ArgumentParser(
         description="Generate event sequences for cold-start evaluation."
     )
-    parser.add_argument("--n_train_seqs", type=int, default=700,
-                        help="number of training sequences (default: 700)")
-    parser.add_argument("--n_val_seqs", type=int, default=100,
-                        help="number of validation sequences (default: 100)")
+    parser.add_argument("--n_train_seqs", type=int, default=800,
+                        help="number of training sequences (default: 800, split 8/9→train, 1/9→val)")
     parser.add_argument("--n_test_seqs", type=int, default=200,
                         help="number of test sequences (default: 200)")
     parser.add_argument("--max_t", type=int, default=500)
@@ -140,9 +138,8 @@ def main():
                 seqs.append(seq)
         return seqs
 
-    with Timer("Simulating train+val+test sequences"):
+    with Timer("Simulating train+test sequences"):
         train_seqs = generate_seqs(args.n_train_seqs, True, "Train")
-        val_seqs   = generate_seqs(args.n_val_seqs,   True, "Val  ")
         test_seqs  = generate_seqs(args.n_test_seqs,  False, "Test ")
 
     # ── Save ──
@@ -151,28 +148,27 @@ def main():
     export_json(vars(args), osp.join(out_dir, "config.json"))
 
     with open(osp.join(out_dir, "statistics.txt"), "w") as f:
-        for name, seqs in [("Train", train_seqs), ("Val", val_seqs), ("Test", test_seqs)]:
+        for name, seqs in [("Train", train_seqs), ("Test", test_seqs)]:
             f.write(f"=== {name} ===\n")
             report = get_event_seqs_report(seqs, n_types)
             print(f"\n{name}: {len(seqs)} seqs"); print(report)
             f.write(report)
 
-    # data.pkl: 700 train + 100 val + 200 test,  train_test_splits 指向正确区间
-    all_seqs = train_seqs + val_seqs + test_seqs
-    train_idx = np.arange(len(train_seqs))                         # 0..699
-    val_idx   = np.arange(len(train_seqs), len(train_seqs) + len(val_seqs))  # 700..799
-    test_idx  = np.arange(len(train_seqs) + len(val_seqs), len(all_seqs))    # 800..999
+    # data.pkl: 800 train (内部8/9拆为~711 train + ~89 val) + 200 test
+    all_seqs = train_seqs + test_seqs
+    train_idx = np.arange(len(train_seqs))
+    test_idx  = np.arange(len(train_seqs), len(all_seqs))
 
     with open(osp.join(out_dir, "data.pkl"), "wb") as f:
         pickle.dump({
             "event_seqs": all_seqs,
             "train_test_splits": [(train_idx, test_idx)],
-            "train_val_splits": [(train_idx, val_idx)],
             "n_types": n_types,
         }, f)
 
     print(f"\nSaved to {out_dir}/")
-    print(f"  data.pkl: {len(train_seqs)} train + {len(val_seqs)} val + {len(test_seqs)} test")
+    print(f"  data.pkl: {len(train_seqs)} train + {len(test_seqs)} test")
+    print(f"  (train split internally 8/9→ ~{int(len(train_seqs)*8/9)} train + ~{int(len(train_seqs)/9)} val)")
 
 
 if __name__ == "__main__":

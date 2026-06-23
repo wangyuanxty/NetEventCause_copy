@@ -28,7 +28,7 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
     """
 
     def __init__(self, ttf_steps: int = 5, ttf_lr: float = 0.01,
-                 ttf_mode: str = 'v', **kwargs):
+                 ttf_mode: str = 'v+decoder', **kwargs):
         """
         ttf_mode: 'v' (仅微调嵌入), 'v+decoder' (微调嵌入+shallow_net)
         """
@@ -64,7 +64,7 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
         d = self.embedding_dim
         cnt = self._ttf_count.get(k, 0)
         self._ttf_count[k] = cnt + 1
-        if cnt >= 50:
+        if cnt >= 10:
             return
 
         if cnt == 0:
@@ -208,7 +208,7 @@ class ColdStartSVD(ExplainableRecurrentPointProcess):
         """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维). 前20次5步, 后续不微调."""
         cnt = self._ttf_count.get(k, 0)
         self._ttf_count[k] = cnt + 1
-        if cnt >= 50:
+        if cnt >= 10:
             return
 
         if cnt == 0:

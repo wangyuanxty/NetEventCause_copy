@@ -161,9 +161,11 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
         return torch.stack(embedding_seqs, dim=0)
 
     def return_all_parameters(self, dim=1):
-        device = self.W.device
-        cs = torch.stack([self.embed[str(t)] for t in range(self.current_n_types)], dim=1)
-        return self.W @ cs
+        cs = torch.stack([self.embed[str(t)] for t in range(self.current_n_types)], dim=1)  # [r, n]
+        result = self.W @ cs  # [d, n]
+        if dim == 0:
+            return result.T  # [n, d]
+        return result  # [d, n]
 
     def refine_c(self, event_seqs: torch.Tensor, k: int, device: torch.device):
         """对新类型 k 做低秩 TTF: 冻结 W, 只优化 c_k (8 维)."""

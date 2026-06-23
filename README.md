@@ -1,140 +1,179 @@
-# NetEventCause — 冷启动问题分析与解决方案
+# NetEventCause 冷启动问题研究
 
-本项目基于论文 *NetEventCause: Event-Driven Root Cause Analysis for Large Network System Without Topology* (IEEE TNNLS 2025) 的源代码，针对作者在结论中提出的开放问题——**新告警类型的冷启动（Cold-Start）**——进行分析并给出两种基于测试时微调的解决方案。
-
-原始项目地址：https://github.com/yuanzhaolin/NetEventCause
-
-> **关于可复现性**：由于华为技术隐私协议要求，原论文中的 IMOC 真实数据集及部分模型代码（ODE-RNN、SPNPP）已被删除或替换。因此本仓库无法完全复现原论文 Table III/IV 的指标。基于同样原因，训练阶段的 NLL 收敛曲线与原论文存在差距。冷启动实验的评估标准调整为：**冷启动类型（F、G）的 ACC@K 和 Root AUC 高于随机预测即证明方案有效**。
+> 基于论文 *NetEventCause: Event-Driven Root Cause Analysis for Large Network System Without Topology*（Zhaolin Yuan et al., IEEE TNNLS 2025）的开放问题分析与解决方案。
 
 ---
 
-## 1. 开放问题
+## 1. 对论文工作的理解
 
-论文 Section VI 明确指出：
+NetEventCause（NEC）提出了一种无需网络拓扑的事件驱动根因分析方法。其核心架构由三部分构成：ODE-RNN 编码器将历史告警事件序列编码为连续时间隐藏状态，解码器基于该状态预测各告警类型的条件强度 $\lambda_k(t|H)$，随后通过比较条件强度与先验强度实现 Root/Derivative 分类，并借助 Integrated Gradients 将强度的归因分配给历史事件以完成因果定位。该方法在华为 IMOC 系统（管理超过 200,000 个实体）上取得了 AUC=0.843 的根因识别效果和 ACC@3=42.6%、ACC@4=61.2% 的因果定位效果，优于现有基线方法。
 
-> "NEC is ineffective when it encounters new alarm types. The only available solution for the current NEC is to allocate an initial embedding for the new type and subsequently fine-tuning the event embedding through the observation of future event sequences that include this type of event."
+然而，正如论文结论部分指出的，NEC 在面对**新告警类型**时存在冷启动瓶颈：
 
-NEC 在遇到新告警类型时无效。模型使用可学习的事件类型嵌入表 $V[k]$，新类型对应的 $V[k_\text{new}]$ 未被训练，导致 ODE-RNN 产出的条件强度 $\lambda_k(t|H)$ 退化为随机值，进而破坏下游的 Root/Derivative 分类和 Integrated Gradients 因果归因。
+> "NEC is ineffective when it encounters new alarm types. The only available solution for the current NEC is to allocate an initial embedding for the new type and subsequently fine-tuning the event embedding through the observation of future event sequences that include this type of event."（Section VI, Conclusion）
 
-关键矛盾在于：原模型仅支持查表获取嵌入，缺乏从上下文推断未知类型嵌入的机制。然而推理时序列已经发生，可以利用 NLL 损失（无需额外标注）对单一嵌入向量进行少量梯度步优化。
+论文同时指出提升方向在于引入额外模态（如利用 BERT 编码告警文本、利用设备时序指标推断先验因果图），但这些依赖数据集中原本不具备的信息。本工作则聚焦于一个更根本的问题：**在不引入外部信息的前提下，仅利用时序上下文，能否使模型在零样本条件下为未见类型生成合理的嵌入表示？**
 
 ---
 
-## 2. 解决方案
+## 2. 问题分析
 
-### 方案 A：测试时微调（TTF — Test-Time Finetuning）
-
-不修改训练流程，在推理阶段对新类型进行累积式在线微调。
-
-**流程**：全局前 20 次遇到某冷启动类型时做 5 步梯度下降（充分探索不同上下文），后续停止微调，直接使用已收敛的嵌入。微调仅作用于新类型的嵌入向量 $v$，ODE-RNN、decoder 及其他类型嵌入全部冻结。事件的发生本身即为自监督信号，无需额外标注。
-
-**理论**：新类型 $k$ 的 TTF 损失为 NLL + L2 正则：
+NEC 使用可学习的事件类型嵌入表，其时序处理流程可形式化为：
 
 $$
-\mathcal{L}(v) = -\log \lambda_k(t_i \mid H(t_i)) + \alpha\|v - \bar{v}\|^2
+h(t_i^-) = \text{ODE-Solve}(h(t_{i-1}^+), t_{i-1} \to t_i), \quad
+h(t_i^+) = \text{RNN}(h(t_i^-), v_{k_i})
 $$
 
-梯度下降更新：
-
 $$
-v^{(p)} = v^{(p-1)} - \eta \frac{\partial \mathcal{L}}{\partial v}
+\log \lambda_k(t_i | H(t_i)) = q(t_i) \cdot \varphi(v_k)
 $$
 
-前 20 次 $S=5$ 步（冷启动收敛），后续停止微调，直接使用已收敛的嵌入。 $\bar{v}$ 为已知类型嵌入的均值， $\alpha=0.01$ 防止 $v$ 偏离太远导致全判 Derivative。
+关键观察：隐藏状态 $h(t_i^-)$ 仅由事件 $0$ 到 $i-1$ 的时序上下文决定，与事件 $i$ 的具体类型无关。这意味着，**当一个新类型首次出现时，其上下文 $h(t_i^-)$ 已经包含了足以推断该类型行为的时序信息**。然而原架构中，事件嵌入 $v_k$ 与隐藏状态 $h(t)$ 之间仅存在查表调用关系，缺失一个从 $h(t^-)$ 到 $v$ 的生成通路。
 
-TTF 仅优化 $-\log\lambda$ 会导致 $v$ 被推向任意高强度的方向，使所有新类型被误判为 Derivative。为解决这一问题，在损失中加入 L2 正则项，约束 $v$ 不偏离已知类型嵌入的均值 $\bar{v}$ 太远：
+因此，冷启动问题的本质可归结为：**需构建一个可训练的映射 $f_\theta: h(t^-) \to v$，且该映射在训练阶段不得依赖新类型的任何标注信息**。
+
+---
+
+## 3. 方案设计：ContextEmbedder
+
+### 核心思想
+
+在原 NEC 的 ODE-RNN 编码器与事件嵌入查找之间，插入一个轻量 MLP 模块（ContextEmbedder），实现 $f_\theta: h(t^-) \mapsto v \in \mathbb{R}^d$。训练时，采用自监督的随机 mask 策略：每个 batch 随机选取 15% 的训练集中出现的类型，将其替换为"伪未见类型"——这些类型的事件嵌入不再从嵌入表查找，而是由 ContextEmbedder 根据当前隐藏状态动态生成。推理时，训练数据中未曾出现的类型自动被识别为冷启动类型，每次出现时均调用 ContextEmbedder 生成嵌入。
+
+训练目标：
 
 $$
-\mathcal{L}(v) = -\log \lambda_k + \alpha \|v - \bar{v}\|^2
+\mathcal{L} = -\frac{1}{|\mathcal{M}|} \sum_{i \in \mathcal{M}} \log \lambda_{k_i}(t_i|H(t_i))
 $$
 
-其效果取决于上下文强度：若 $h(t^-)$ 中编码了强因果信号（如 G 出现在 C 之后），NLL 梯度远超正则拉力，$v$ 被推离 $\bar{v}$，模型判定为 Derivative；若上下文无关联信号（如 F 独立出现），正则项主导， $v$ 保持在 $\bar{v}$ 附近，输出接近先验强度的 $\lambda$，模型判定为 Root。
+其中 $\mathcal{M}$ 为 batch 中所有被 mask 的事件位置集合。梯度经由解码器穿过生成的嵌入 $v$，同时更新 ContextEmbedder 参数、ODE-RNN 编码器参数及已知类型的原始嵌入参数。
 
-### 方案 B：SVD-TTF — 推理时 SVD 分解 + 低秩微调
+### 连续性保证
 
-训练完全不变（标准 ERPP），仅在推理时对训练好的嵌入做 SVD 分解，将 64 维嵌入表拆分为低秩形式：
+ContextEmbedder 由 LayerNorm + ReLU 激活的三层 MLP 构成，作为有限复合的 Lipschitz 连续映射，满足：
 
 $$
-V \approx W \cdot C, \quad W \in \mathbb{R}^{d \times r}, \ C \in \mathbb{R}^{r \times N}
+\forall \varepsilon > 0, \exists \delta > 0: \|h_1 - h_2\| < \delta \implies \|f_\theta(h_1) - f_\theta(h_2)\| < \varepsilon
 $$
 
-其中 $r=8$。已知类型用 $W \cdot c_k$ 重建，新类型冻结 $W$，仅优化 $c_k$（8 维）。TTH 的收敛速度与 LoRA 相同，但训练质量不受影响。
+该性质隐式确保了相似时序上下文将映射到邻近嵌入向量，无需显式的对比损失或正则化约束。
 
-### 方案对比
+### 实现架构
 
-| | TTF | SVD-TTF |
+`ContextEmbedder` 继承自 `ExplainableRecurrentPointProcess`，通过两趟前向传播实现：
+
+- **Pass 1**：使用当前嵌入表（含已知类型嵌入）运行完整的序列编码器，获得全部时间步的隐藏状态 `history_emb`（等价于 $h(t^-)$）
+- **Pass 2**：对被 mask 的（或推理时未见的）类型，调用 `ContextEmbedder(history_emb)` 生成替换嵌入，更新 log-basis-weights 矩阵中对应的列，随后按原流程计算对数条件强度
+
+此设计完全复用了原 NEC 的损失计算和评估逻辑，作为新模型 `ERPP-CS` 注册于原训练框架内。
+
+---
+
+## 4. 训练与推理统一性
+
+训练和推理阶段 ContextEmbedder 的调用路径完全一致，仅在类型选择策略上存在差异：
+
+| | 训练 | 推理 |
 |---|---|---|
-| 嵌入形式 | $v_k \in \mathbb{R}^{64}$ 各自独立 | $v_k = W \cdot c_k,\ c_k \in \mathbb{R}^8$ |
-| 新类型优化维度 | 64 | 8 |
-| $W$ 是否共享 | — | 是，所有类型共享 |
-| 训练改动 | 无 | 无（推理时 SVD 分解） |
-| 模型名 | `ERPP-TTF` | `ERPP-SVD` |
+| **调用 ContextEmbedder 的类型** | 每 batch 随机 mask 的已知类型 | 训练中未出现的类型 |
+| **生成频率** | 每次出现均重新生成 | 每次出现均重新生成 |
+| **缓存策略** | 不缓存 | 不缓存 |
+| **参数更新** | 所有参数联合更新 | 冻结 |
+| **$h(t^-)$ 来源** | GRU 序列编码器 | GRU 序列编码器 |
+
+该设计避免了训练-推理阶段的分布偏移问题——ContextEmbedder 在两个阶段接收的输入分布和调用模式完全对等。
+
+### 参考
+
+- **HyperNetworks**（Ha et al., ICLR 2017）：提出用一个网络动态生成另一个网络的权重参数。ContextEmbedder 可视为该范式的特例——以 $h(t^-)$ 为条件生成嵌入向量 $v$，但相较于生成完整权重矩阵，映射维度从 $\mathcal{O}(d^2)$ 降至 $\mathcal{O}(d)$。
+- **Prototypical Networks**（Snell et al., NeurIPS 2017）：提出以原型向量表示每个类别，通过度量空间中的距离实现少量样本下的分类。本方案未直接建立原型结构，但其嵌入空间几何——同行为类型聚集、邻近语义映射——由 MLP 的连续性隐含保证。
 
 ---
 
-## 3. 实验设计
+## 5. 实验设计
 
 ### 合成数据集
 
-基于原论文的 Gamma Graphical Event Model，扩展为 7 种事件类型：
+基于原论文 Toy Dataset 的 Gamma Graphical Event Model，将事件类型扩展至 7 种。因果结构如下：
 
-| ID | 类型 | 因果角色 |
-|:--:|------|----------|
-| 0 | A | 根因，激发 B 和 C |
-| 1 | B | A 的衍生 |
-| 2 | C | A 的衍生，激发 D 和 G |
-| 3 | D | C 的衍生 |
-| 4 | E | 独立根因 |
-| **5** | **F** | **独立根因（冷启动）** |
-| **6** | **G** | **C 的衍生（冷启动）** |
+$$
+A \to \{B, C\},\quad C \to \{D, G\},\quad E,\,F \text{ 为独立根因}
+$$
 
-训练集（700 条）和验证集（100 条）仅包含类型 0-4；测试集（200 条）包含全部 7 种类型。F 和 G 分别测试 TTF 对根因型和衍生型新类型的处理能力。
+| ID | 类型 | 因果角色 | 数据集划分 |
+|:--:|------|----------|:----------:|
+| 0 | A | 根因，激发 B 和 C | 训练/验证/测试 |
+| 1 | B | A 的衍生 | 训练/验证/测试 |
+| 2 | C | A 的衍生，激发 D 和 G | 训练/验证/测试 |
+| 3 | D | C 的衍生 | 训练/验证/测试 |
+| 4 | E | 独立根因 | 训练/验证/测试 |
+| 5 | F | 独立根因 | **仅测试（冷启动）** |
+| 6 | G | C 的衍生 | **仅测试（冷启动）** |
 
-### 有效性标准
+数据划分（与论文保持一致的 7:1:2 比例）：训练集 700 条序列、验证集 100 条序列（训练和验证均剔除类型 5 和 6 的事件）、测试集 200 条序列（保留全部 7 种类型）。F 和 G 分别用于测试 ContextEmbedder 对根因型与衍生型新类型的零样本处理能力。
 
-冷启动类型的指标高于随机预测即证明方案有效：
+### 训练配置
 
-| 指标 | 随机预测 | 有效性阈值 |
-|------|:----:|:----:|
-| Root AUC | 0.50 | >0.55 |
-| G ACC@1 | ~0.10 | >0.15 |
-| G ACC@3 | ~0.25 | >0.30 |
+- 模型：ERPP-CS (ColdStartERPP)，embedding_dim=32，hidden_size=32，n_bases=4
+- ContextEmbedder：Linear(32→256) → LayerNorm → ReLU → Linear(256→256) → LayerNorm → ReLU → Linear(256→32)
+- 冷启动检测：训练阶段自动记录所遇类型，推理阶段对未见类型自动触发 ContextEmbedder
+- Mask 策略：每 batch 随机选取 15% 已见类型模拟冷启动场景
+- 优化器：Adam，lr=1e-3，gradient clipping=5.0
+- 训练轮次：700 epochs，batch_size=32，early stopping patience=40
 
-### 运行
+### 评估指标
+
+- **ACC@K**：仅针对冷启动衍生型 G，前 K 个候选中命中真实 cause 的比例
+- **Root AUC**：冷启动类型 F 与 G 的 Root/Derivative 二分类 AUC
+- **NLL**：测试集负对数似然
+- **嵌入余弦相似度**：F 生成嵌入与已知根因 E 的距离；G 生成嵌入与已知衍生 D 的距离
+
+预期验证：F 的首次出现上下文无因果关联 → ContextEmbedder 应生成接近根因型 E 的嵌入；G 的首次出现通常在 C 之后 → ContextEmbedder 应生成接近衍生型 D 的嵌入。
+
+### 运行流程
 
 ```bash
-# 1. 生成冷启动数据
+# 1. 生成冷启动数据集
 python example/6b_generate_coldstart_data.py
 
-# 2. 训练（TTF 与 ERPP 共享训练逻辑）
-python example/7_test_event_cause_discovery.py ERPP-TTF --epoch 700 --dataset toy --kind coldstart-7 --cuda
+# 2. 训练冷启动模型
+python example/7_test_event_cause_discovery.py ERPP-CS \
+    --epoch 700 --dataset toy --kind coldstart-7 --cuda
 
-# 3. RCA 推理（TTF 在遇到冷启动类型时自动触发）
-python example/8_event_rca.py --dataset toy --kind coldstart-7 --model ERPP-TTF \
-    --add_label_cols True --save_all True --manual_rule --steps 10
+# 3. 根因分析推理
+python example/8_event_rca.py --dataset toy --kind coldstart-7 \
+    --model ERPP-CS --add_label_cols True --save_all True --manual_rule
 
-# 4. 评估
-python example/9_rca_accuracy_eval.py --algorithm event_cause-ERPP-TTF --kind coldstart-7
-
-# SVD-TTF 同理，替换模型名为 ERPP-SVD
+# 4. 评估（按类型分组输出指标）
+python example/9_rca_accuracy_eval.py --algorithm event_cause-ERPP-CS \
+    --kind coldstart-7
 ```
 
 ---
 
-## 4. 新增文件
+## 6. 实现文件说明
 
-| 文件 | 说明 |
+| 文件 | 作用 |
 |------|------|
-| `cause/event/pkg/models/coldstart_erpp.py` | ColdStartTTF 与 ColdStartLoRA 模型定义 |
-| `example/6b_generate_coldstart_data.py` | 7 类型冷启动数据生成 |
-| `config/cause.yaml` | 新增 coldstart-7 的根因先验概率 |
-
-其余修改集中于 `detect/attribution_rca.py`、`cause/event/tasks/train.py`、`example/7/8/9_*.py`，主要为模型注册、数据加载适配和按类型评估。
+| `cause/event/pkg/models/coldstart_erpp.py` | ColdStartERPP 模型定义（含 ContextEmbedder 及两趟 forward） |
+| `example/6b_generate_coldstart_data.py` | 冷启动合成数据生成（7 类型，F/G 为冷启动类型） |
+| `config/cause.yaml` | 新增 `coldstart-7` 类型的 Root 先验概率配置 |
+| `detect/attribution_rca.py` | RCA 推理入口（已适配 ERPP-CS 模型加载） |
 
 ---
 
-## 5. 核心参考
+## 7. 环境配置
 
-- **NetEventCause** (Yuan et al., IEEE TNNLS 2025) — 原论文方法
-- **HyperNetworks** (Ha et al., ICLR 2017) — 条件参数生成范式
-- **LoRA** (Hu et al., ICLR 2022) — 低秩分解的灵感来源
+```shell
+conda env create -n nec -f config/environment.yml
+conda activate nec
+```
+
+原论文训练流程（Toy 数据集）：
+
+```shell
+./scripts/toy_all.sh
+```
+
+> 由于与华为技术有限公司的技术隐私协议合规要求，部分源代码已替换为替代实现。

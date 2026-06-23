@@ -157,15 +157,17 @@ def main():
             print(f"\n{name}: {len(seqs)} seqs"); print(report)
             f.write(report)
 
-    # data.pkl: 800 train+val + 200 test (train_nn_models 内部做 8/9 拆分)
+    # data.pkl: 700 train + 100 val + 200 test,  train_test_splits 指向正确区间
     all_seqs = train_seqs + val_seqs + test_seqs
-    train_idx = np.arange(len(train_seqs) + len(val_seqs))        # 0..799
-    test_idx  = np.arange(len(train_seqs) + len(val_seqs), len(all_seqs))  # 800..999
+    train_idx = np.arange(len(train_seqs))                         # 0..699
+    val_idx   = np.arange(len(train_seqs), len(train_seqs) + len(val_seqs))  # 700..799
+    test_idx  = np.arange(len(train_seqs) + len(val_seqs), len(all_seqs))    # 800..999
 
     with open(osp.join(out_dir, "data.pkl"), "wb") as f:
         pickle.dump({
             "event_seqs": all_seqs,
             "train_test_splits": [(train_idx, test_idx)],
+            "train_val_splits": [(train_idx, val_idx)],
             "n_types": n_types,
         }, f)
 

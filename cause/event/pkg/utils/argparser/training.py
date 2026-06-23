@@ -94,7 +94,7 @@ def add_subparser_arguments(model, subparsers):
         sub_parser.add_argument(
             "--tune_metric", type=str, default="nll", help="default: nll"
         )
-    elif model in ("ERPP", "SPNPP", "ERPP-TTF", "ERPP-SVD"):
+    elif model == "ERPP" or model == "SPNPP" or model == "ERPP-CS":
         # add sub-parsers for each individual model
         sub_parser = subparsers.add_parser(
             model, help="Explainable Recurrent Point Process"
@@ -160,6 +160,11 @@ def add_subparser_arguments(model, subparsers):
 
         sub_parser.add_argument(
             "--tune_metric", type=str, default="nll", help="default: nll"
+        )
+        # cold-start args (only effective for ERPP-CS)
+        sub_parser.add_argument(
+            "--mask_ratio", type=float, default=0.15,
+            help="ratio of types to mask per batch for ContextEmbedder training (default: 0.15)"
         )
 
     elif model == "RME":

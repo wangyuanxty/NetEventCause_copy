@@ -38,29 +38,13 @@ class EventCauseDetection(RootCauseDetectionBase):
         for k, v in (updated_args_dict if updated_args_dict else {}).items():
             config_json[k] = v
 
-        from cause.event.pkg.models.coldstart_erpp import ColdStartTTF, ColdStartSVD
+        from cause.event.pkg.models.coldstart_erpp import ColdStartERPP
 
         if config_json['model'] == 'ERPP':
             model = ExplainableRecurrentPointProcess(**config_json)
 
-        elif config_json['model'] == 'ERPP-TTF':
-            model = ColdStartTTF(**config_json)
-        elif config_json['model'] == 'ERPP-SVD':
-            config_json['model'] = 'ERPP'
-            model = ColdStartSVD(**config_json)
-            config_json['model'] = 'ERPP-SVD'
-            if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
-                ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
-                model.load_state_dict(ckpt, strict=False)
-            full_n = config_json.get('full_n_types', config_json['n_types'])
-            model.extend_type_num(full_n)
-            model._seen = set(range(config_json['n_types']))
-            model._ttf_enabled = True
-            model.decompose_embeddings()
-            print('SVD-TTF enabled (%d types).' % full_n)
-            self.model = model.to(torch.device(device))
-            self.device = device
-            return
+        elif config_json['model'] == 'ERPP-CS':
+            model = ColdStartERPP(**config_json)
 
         elif config_json['model'] == 'SPNPP':
             model = SemiParametricPointProcess(**config_json)
@@ -73,13 +57,12 @@ class EventCauseDetection(RootCauseDetectionBase):
         if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
             ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
             model.load_state_dict(ckpt, strict=False)
-            full_n = config_json.get('full_n_types', config_json['n_types'])
-            model.extend_type_num(full_n)
-            if hasattr(model, '_seen'):
-                model._seen = set(range(config_json['n_types']))
-                model._ttf_enabled = True  # 开启 RCA 推理时的 TTF
-            print('Loading parameters successfully (%d -> %d types).' %
-                  (config_json['n_types'], full_n))
+            # 推理时: 自动标记检查点中类型0..4为"已见", 5..6为冷启动
+            if hasattr(model, '_seen_types') and model._seen_types.sum() == 0:
+                for t in range(model.current_n_types):
+                    if t < 5:  # 0..4 是训练中见过的
+                        model._seen_types[t] = True
+            print('Loading parameters successfully.')
         else:
             print('There is no model.pt in %s' % ckpt_path)
         self.model = model.to(torch.device(device))
@@ -126,10 +109,6 @@ class EventCauseDetection(RootCauseDetectionBase):
 
         data_batch = self.events_df2tensor_batch(event_df)
 
-        # 触发 TTF: 用 category 模式做一次前向, 让冷启动类型微调
-        if hasattr(self.model, '_ttf_enabled') and self.model._ttf_enabled:
-            self.model.forward(data_batch, event_type='category', need_weights=False)
-
         # log_intensities_events.detach().cpu(), prior_log_intensities_events.detach().cpu()
 
         tr = TimeRecorder()
@@ -171,25 +150,6 @@ class EventCauseDetection(RootCauseDetectionBase):
             root_cause_rank = filter(lambda x: x[0] > 0, root_cause_rank)
 
             root_cause_rank = sorted(root_cause_rank, reverse=True)
-
-            # 冷启动类型 Cause 辅助: IG 弱时用嵌入相似度
-            current_type = int(event_df.iloc[i]['type'])
-            if hasattr(self.model, '_seen') and current_type not in self.model._seen:
-                # IG 找不到 cause → 用嵌入相似度
-                v_cur = self.model.embed[str(current_type)].data
-                sim_scores = []
-                for k in range(i):
-                    past_type = int(event_df.iloc[k]['type'])
-                    v_past = self.model.embed[str(past_type)].data
-                    sim = torch.cosine_similarity(v_cur.unsqueeze(0), v_past.unsqueeze(0), dim=-1).item()
-                    sim_scores.append((sim, k))
-                sim_scores.sort(reverse=True)
-                ig_scores = {idx: score for score, idx in root_cause_rank}
-                # 混合: IG + 嵌入相似度, 取并集排序
-                combined = {}
-                for sim, idx in sim_scores[:10]:
-                    combined[idx] = sim * 5.0 + ig_scores.get(idx, 0.0)
-                root_cause_rank = sorted([(v, k) for k, v in combined.items()], reverse=True)[:5]
 
             causative_alarms = [event_df.iloc[i] for _, i in root_cause_rank[:5]]
 

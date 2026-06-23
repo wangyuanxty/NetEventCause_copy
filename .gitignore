@@ -107,7 +107,3 @@ venv.bak/
 .idea/
 my_scripts/
 NetEventCause-Notes.md
-cache/
-checkpoints/
-data/
-outputs/

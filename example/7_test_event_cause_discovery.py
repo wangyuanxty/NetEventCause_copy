@@ -77,13 +77,6 @@ if __name__ == "__main__":
     with open(osp.join(input_path, "data.pkl"), "rb") as f:
         data = pickle.load(f)
     n_types = int(data["n_types"])
-    # 冷启动数据集：训练时只建已知类型的嵌入
-    train_n_types = n_types
-    if 'coldstart' in args.kind:
-        train_idx = [int(i) for i in data["train_test_splits"][0][0]]
-        train_n_types = int(max(t for s in [data["event_seqs"][i] for i in train_idx]
-                               for t in s[:, 1].astype(int)) + 1)
-    setattr(args, 'full_n_types', n_types)
 
     # Loading prior probability of each event type occurring as root alarms
     with open(os.path.join(PROJECT_ROOT_PATH, 'config', 'cause.yaml'), 'r') as f:
@@ -97,10 +90,10 @@ if __name__ == "__main__":
                 root_prob.append(prior_root_alarm_prob[int(event_type)])
 
     setattr(args, 'root_prob', root_prob)
-    setattr(args, 'full_n_types', n_types)
-    setattr(args, 'n_types', train_n_types)
+    setattr(args, 'n_types', n_types)
+
     export_json(vars(args), osp.join(output_path, "config.json"))
-    args.n_types = n_types  # 恢复完整类型数供后续使用
+    del args.n_types
 
     logger.info(args)
 
@@ -122,9 +115,10 @@ if __name__ == "__main__":
                 find_dir_until(
                     osp.join(PROJECT_ROOT_PATH, 'checkpoints', args.previous_model_dir, args.kind), 'model.pt'
                 ) is None:
-            model = get_model(args, train_n_types)
+            model = get_model(args, n_types)
         else:
             ckpt_path = find_dir_until(osp.join(PROJECT_ROOT_PATH, 'checkpoints', args.previous_model_dir, args.kind), 'model.pt')
+            # old_args_file = find_dir_until(osp.join(PROJECT_ROOT_PATH, 'checkpoints', args.previous_model_dir, args.kind), 'config.json')
 
             with open(os.path.join(ckpt_path, 'config.json')) as f:
                 config_json = json.load(f)
@@ -139,9 +133,9 @@ if __name__ == "__main__":
                 )
                 print('Loading parameters from %s successfully.' % ckpt_path)
 
-            model.extend_type_num(train_n_types)
+            model.extend_type_num(n_types)
 
-        if args.model in ["ODE-RNN", "SPNPP", "RME", "ERPP", "ERPP-TTF", "ERPP-SVD", "RPPN"]:
+        if args.model in ["ODE-RNN", "SPNPP", "RME", "ERPP", "ERPP-CS", "RPPN"]:
             train.dataloader_args = {
                 "batch_size": args.batch_size,
                 "collate_fn": EventSeqDataset.collate_fn,

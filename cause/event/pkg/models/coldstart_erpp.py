@@ -140,19 +140,19 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
             self.optim.add_param_group({'params': self.embed[str(event_type)]})
 
     def event_type2embedding(self, event_seqs, device=None):
-        """v_k = W @ c_k"""
+        """v_k = W @ c_k. 返回 [B, T, d+1], 第 0 列占位, 1: 为嵌入."""
         if device is None:
             device = self.get_model_device()
-        e = torch.zeros(
-            event_seqs.size()[:2] + (self.embedding_dim + 1,),
-            device=device, dtype=torch.float
-        )
+        B, T = event_seqs.size()[:2]
+        e = torch.zeros(B, T, self.embedding_dim + 1,
+                         device=device, dtype=torch.float)
         for k_str, c in self.embed.items():
             k = int(k_str)
             mask = (event_seqs[:, :, 1].long() == k)
             if mask.any():
-                v = self.W @ c  # [d]
-                e[mask, 1:] = v.unsqueeze(0).expand(mask.sum(), -1)
+                v = self.W @ c
+                n = mask.sum().item()
+                e[mask, 1:] = v.unsqueeze(0).expand(n, -1)
         return e
 
     def return_all_parameters(self, dim=1):

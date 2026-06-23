@@ -46,28 +46,7 @@ class EventCauseDetection(RootCauseDetectionBase):
         elif config_json['model'] == 'ERPP-TTF':
             model = ColdStartTTF(**config_json)
         elif config_json['model'] == 'ERPP-LoRA':
-            config_json['model'] = 'ERPP'
-            model = ExplainableRecurrentPointProcess(**config_json)
-            config_json['model'] = 'ERPP-LoRA'
-            if os.path.exists(os.path.join(ckpt_path, 'model.pt')):
-                ckpt = torch.load(os.path.join(ckpt_path, 'model.pt'), weights_only=True)
-                model.load_state_dict(ckpt, strict=False)
-            full_n = config_json.get('full_n_types', config_json['n_types'])
-            model.extend_type_num(full_n)
-            model.__class__ = ColdStartLoRA
-            model.rank = config_json.get('rank', 16)
-            model.ttf_steps = config_json.get('ttf_steps', 5)
-            model.ttf_lr = config_json.get('ttf_lr', 0.01)
-            model._seen = set(range(config_json['n_types']))
-            model._ttf_done = set()
-            model._ttf_enabled = True
-            model.W = None
-            model.c_buf = {}
-            print('LoRA-TTF enabled for cold-start inference (%d -> %d types).' %
-                  (config_json['n_types'], full_n))
-            self.model = model.to(torch.device(device))
-            self.device = device
-            return
+            model = ColdStartLoRA(**config_json)
 
         elif config_json['model'] == 'SPNPP':
             model = SemiParametricPointProcess(**config_json)

@@ -46,7 +46,6 @@ class ColdStartTTF(ExplainableRecurrentPointProcess):
                       if k not in self._seen and k < self.current_n_types]
             if cold_k:
                 dev = event_seqs.device
-                self._ttf_done.clear()  # 新序列, 重新开始
                 for k in cold_k:
                     self.refine_v(event_seqs, k, dev)
         return super().forward(event_seqs, event_type, need_weights, target_type, device)

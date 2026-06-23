@@ -1,6 +1,8 @@
 # NetEventCause 冷启动问题研究
 
 > 基于论文 *NetEventCause: Event-Driven Root Cause Analysis for Large Network System Without Topology*（Zhaolin Yuan et al., IEEE TNNLS 2025）的开放问题分析与解决方案。
+>
+> 原仓库：[github.com/yuanzhaolin/NetEventCause](https://github.com/yuanzhaolin/NetEventCause)
 
 ---
 

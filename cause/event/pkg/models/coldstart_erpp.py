@@ -108,7 +108,7 @@ class ColdStartLoRA(ExplainableRecurrentPointProcess):
     推理: 新类型 → W 冻结, c_k 做 TTF (只要 8 维, 收敛快)
     """
 
-    def __init__(self, rank: int = 8, ttf_steps: int = 5, ttf_lr: float = 0.01, **kwargs):
+    def __init__(self, rank: int = 16, ttf_steps: int = 5, ttf_lr: float = 0.01, **kwargs):
         self.rank = rank  # 必须在 super() 之前, update_event_type 需要
         super().__init__(**kwargs)
         self.W = nn.Parameter(torch.randn(self.embedding_dim, rank) * 0.02)

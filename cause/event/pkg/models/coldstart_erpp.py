@@ -60,6 +60,15 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         return {t for t in range(self.current_n_types)
                 if t >= len(self._seen_types) or not bool(self._seen_types[t].item())}
 
+    def return_all_parameters(self, dim=1):
+        params = super().return_all_parameters(dim=dim)
+        return F.normalize(params, dim=0 if dim == 1 else -1, eps=1e-8)
+
+    def event_type2embedding(self, event_seqs, device=None):
+        embeds = super().event_type2embedding(event_seqs, device)
+        emb_norm = F.normalize(embeds[..., 1:], dim=-1)
+        return torch.cat([embeds[..., :1], emb_norm], dim=-1)
+
     def forward(
         self, event_seqs, event_type='category',
         need_weights=True, target_type=-1, device=None
@@ -105,8 +114,11 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         # event_type='feat' 时 event_seqs[:,:,1:] 是嵌入值不是 type ID,
         # 此时用 cold_data 里预先存在的 per-position embedding
         if cold_data is not None and event_type == 'feat':
-            for k, (b_idx, t_idx, gen_v) in cold_data.items():
-                new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
+            for k, (b_idx, t_idx, _) in cold_data.items():
+                # 从当前 X 的 history_emb 重新生成 gen_v (IG 积分需要梯度一致性)
+                cur_gen_v = self.embedder(history_emb[b_idx, t_idx])
+                cur_gen_v = F.normalize(cur_gen_v, dim=-1)
+                new_w = (log_basis_feat[b_idx, t_idx] * cur_gen_v.unsqueeze(1)).sum(dim=-1)
                 for j in range(len(b_idx)):
                     log_basis_weights[b_idx[j], t_idx[j], :, k] = new_w[j]
         else:
@@ -119,6 +131,7 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
                     continue
                 gen_h = history_emb[k_mask]
                 gen_v = self.embedder(gen_h)
+                gen_v = F.normalize(gen_v, dim=-1)
                 b_idx, t_idx = k_mask.nonzero(as_tuple=True)
                 new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
                 for j in range(len(b_idx)):
@@ -238,7 +251,8 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             if not k_mask.any():
                 continue
             b_idx, t_idx = k_mask.nonzero(as_tuple=True)
-            gen_v = self.embedder(history_emb[k_mask])  # [n, d], 每位置独立
+            gen_v = self.embedder(history_emb[k_mask])  # [n, d]
+            gen_v = F.normalize(gen_v, dim=-1)
             cold_data[k] = (b_idx, t_idx, gen_v)
 
         # ── 注入 cold_data 到 forward, 跑 IG ──

@@ -230,7 +230,7 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         history_emb, *_ = self.seq_encoder(feat)
         history_emb = self.dropout(history_emb)
 
-        # ── 逐位置生成冷启动嵌入 ──
+        # ── 逐位置生成冷启动嵌入 (与训练一致) ──
         type_col = batch[:, :, 1].long()
         cold_data = {}
         for k in replace_types:
@@ -238,7 +238,7 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             if not k_mask.any():
                 continue
             b_idx, t_idx = k_mask.nonzero(as_tuple=True)
-            gen_v = self.embedder(history_emb[k_mask])
+            gen_v = self.embedder(history_emb[k_mask])  # [n, d], 每位置独立
             cold_data[k] = (b_idx, t_idx, gen_v)
 
         # ── 注入 cold_data 到 forward, 跑 IG ──

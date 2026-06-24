@@ -99,7 +99,7 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             batch_size, T, self.n_bases + 1, self.embedding_dim
         )
         all_embeds = self.return_all_parameters(dim=1)  # [d, n_types]
-        log_basis_weights = log_basis_feat @ all_embeds  # [B, T, n_types, n_bases+1]
+        log_basis_weights = log_basis_feat @ all_embeds  # [B, T, n_bases+1, n_types]
 
         # ── 替换冷启动类型的 decoder 权重 (逐位置 embedding) ──
         # event_type='feat' 时 event_seqs[:,:,1:] 是嵌入值不是 type ID,
@@ -108,7 +108,7 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             for k, (b_idx, t_idx, gen_v) in cold_data.items():
                 new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
                 for j in range(len(b_idx)):
-                    log_basis_weights[b_idx[j], t_idx[j], k, :] = new_w[j]
+                    log_basis_weights[b_idx[j], t_idx[j], :, k] = new_w[j]
         else:
             # event_type='category' 时可以直接用 type ID 定位
             for k in replace_types:
@@ -122,7 +122,7 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
                 b_idx, t_idx = k_mask.nonzero(as_tuple=True)
                 new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
                 for j in range(len(b_idx)):
-                    log_basis_weights[b_idx[j], t_idx[j], k, :] = new_w[j]
+                    log_basis_weights[b_idx[j], t_idx[j], :, k] = new_w[j]
 
         log_basis_weights = log_basis_weights.transpose(-2, -1).contiguous()
         basis_values = torch.cat(

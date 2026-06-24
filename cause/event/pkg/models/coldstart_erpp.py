@@ -72,8 +72,8 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             device = self.get_model_device()
 
         replace_types = self._types_to_replace()
-        if not replace_types:
-            # 无类型需要替换, 直接走父类
+        # 'feat' 模式: 嵌入已在 get_seq_contribution 中预处理, 跳过冷启动替换
+        if not replace_types or event_type == 'feat':
             return super().forward(event_seqs, event_type, need_weights, target_type, device)
 
         # ── Pass 1: 用原嵌入表跑完整的 encoder ──
@@ -105,20 +105,23 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         # 对需要替换的类型, 从 history_emb 生成新嵌入
         # history_emb[:, i, :] 编码了事件 0..i-1, ≈ h(t_i-)
         # 事件 i 的嵌入用于 decoder 位置 i
+        # 先算所有类型的 log_basis_weights
+        log_basis_weights = log_basis_feat @ all_embeds  # [B, T, n_types, n_bases+1]
+
+        # 冷启动类型: 逐位置生成嵌入, 替换对应位置的 decoder 输出
         for k in replace_types:
             if k >= self.current_n_types:
                 continue
-            # 找出该类型在序列中出现的位置
             k_mask = (event_seqs[:, :, 1].long() == k)  # [B, T]
             if not k_mask.any():
                 continue
-            # 取这些位置的 history_emb → ContextEmbedder → mean
-            gen_h = history_emb[k_mask]  # [n_occurrences, hidden]
-            gen_v = self.embedder(gen_h).mean(dim=0)  # [d]
-            all_embeds[:, k] = gen_v
+            gen_h = history_emb[k_mask]   # [n, hidden]
+            gen_v = self.embedder(gen_h)  # [n, d], 每个位置独立生成
+            b_idx, t_idx = k_mask.nonzero(as_tuple=True)
+            # 替换: log_basis_weights[b, :, k, t] = log_basis_feat[b,t] · gen_v_i
+            new_weight = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
+            log_basis_weights[b_idx, :, k, t_idx] = new_weight
 
-        # 原 decoder 计算: log_basis_weights = log_basis_feat @ all_embeds
-        log_basis_weights = log_basis_feat @ all_embeds  # [B, T, n_types, n_bases+1]
         log_basis_weights = log_basis_weights.transpose(-2, -1).contiguous()
 
         # 强度: + basis_values → logsumexp
@@ -209,3 +212,65 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
                 self._eval_acc(batch, log_intensities, mask), seq_length.sum()
             )
         return metrics
+
+    def get_seq_contribution(self, batch, device=None, steps=50, **kwargs):
+        from functools import partial
+        from ..explain.integrated_gradient import batch_integrated_gradient
+        from ..utils.torch import set_eval_mode, generate_sequence_mask
+
+        replace_types = self._types_to_replace()
+        if not replace_types:
+            return super().get_seq_contribution(batch, device, steps, **kwargs)
+
+        set_eval_mode(self)
+        for param in self.parameters():
+            param.requires_grad_(False)
+        if device:
+            batch = batch.to(device)
+        B, T = batch.size()[:2]
+
+        # ── 计算 history_emb ──
+        ts = F.pad(batch[:, :, 0], (1, 0))
+        dt = F.pad(ts[:, 1:] - ts[:, :-1], (1, 0))
+        temp_feat = dt[:, :-1].unsqueeze(-1)
+        type_feat = self.event_type2embedding(batch)[:, :-1, 1:]
+        type_feat = F.pad(type_feat, (0, 0, 1, 0))
+        feat = torch.cat([temp_feat, type_feat], dim=-1)
+        history_emb, *_ = self.seq_encoder(feat)
+        history_emb = self.dropout(history_emb)
+
+        # ── 逐位置生成冷启动嵌入, 构建 inputs ──
+        inputs = self.event_type2embedding(batch)  # [B, T, 1+d]
+        type_col = batch[:, :, 1].long()
+        for k in replace_types:
+            k_mask = (type_col == k)
+            if not k_mask.any():
+                continue
+            gen_v = self.embedder(history_emb[k_mask])  # [n, d], 每位置独立
+            b_idx, t_idx = k_mask.nonzero(as_tuple=True)
+            inputs[b_idx, t_idx, 1:] = gen_v
+
+        baselines = F.pad(inputs[:, :, :1], (0, self.embedding_dim))
+        seq_lengths = (batch.abs().sum(-1) > 0).sum(-1)
+        event_scores = torch.zeros(B, T, T - 1, device=device)
+
+        def _func(X, p, b):
+            li = self.forward(X, event_type='feat', need_weights=False)
+            return torch.gather(li[:, p], dim=-1, index=b[:, p, 1:].repeat(X.size(0), 1).long())
+
+        for pos in range(T):
+            mask_p = (seq_lengths > pos)
+            ig = batch_integrated_gradient(
+                partial(_func, p=pos, b=batch), inputs, baselines=baselines,
+                mask=mask_p, steps=steps,
+            )
+            event_scores[:, pos] = ig[:, :-1].sum(-1)
+
+        log_ints = self.forward(inputs, event_type='feat', need_weights=False)
+        log_ints_events = log_ints.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
+        base_ints_events = self.forward(baselines, event_type='feat', need_weights=False)
+        base_ints_events = base_ints_events.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
+        prior_ints_events = self.event_prior_intensities(batch)
+
+        return (event_scores.detach().cpu(), log_ints_events.detach().cpu(),
+                base_ints_events.detach().cpu(), prior_ints_events.detach().cpu())

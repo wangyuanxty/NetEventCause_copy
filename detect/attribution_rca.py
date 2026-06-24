@@ -153,19 +153,14 @@ class EventCauseDetection(RootCauseDetectionBase):
 
             causative_alarms = [event_df.iloc[i] for _, i in root_cause_rank[:5]]
 
-            if len(causative_alarms) == 0 or i == 0:
-                modified_root_prob = 1.0
-            else:
-                modified_root_prob = root_alarm_prob
-
-            # result.loc[compressed_df.iloc[i].name, 'modified_root_prob'] = modified_root_prob
+            modified_root_prob = root_alarm_prob
 
             cols += ['modified_root_prob']
             res += [modified_root_prob]
 
             cols += ['root_alarm', 'depth']
 
-            if modified_root_prob > 0.5:
+            if len(causative_alarms) == 0 or i == 0 or modified_root_prob > 0.5:
                 # 识别 i 为根告警
                 # result.loc[compressed_df.iloc[i].name, 'root_alarm'] = True
                 # root_cause_rank = [(np.inf, i)] + root_cause_rank

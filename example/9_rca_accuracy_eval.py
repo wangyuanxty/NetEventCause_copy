@@ -178,12 +178,17 @@ for algorithm in os.listdir(outputs_dir):
     if 'type' in ground_truth_df.columns:
         type_col = ground_truth_df['type']
         all_types = sorted(type_col.unique())
-        n_total = len(all_types)
-        n_cold = 2  # 最后两个是冷启动类型
-        known_types = all_types[:n_total - n_cold]
-        cold_types  = all_types[n_total - n_cold:]
 
-        for group_name, type_list in [('Known(A~E)', known_types), ('Cold(F,G)', cold_types)]:
+        if args.kind == 'coldstart-7':
+            # coldstart-7: 0-4 is known, 5-6 is cold
+            known_types = [t for t in all_types if t <= 4]
+            cold_types  = [t for t in all_types if t >= 5]
+            groups = [('Known(A~E)', known_types), ('Cold(F,G)', cold_types)]
+        else:
+            # ggem-1K-5 / other: all types are known
+            groups = [('All types', all_types)]
+
+        for group_name, type_list in groups:
             mask = type_col.isin(type_list)
             gt_df_k = ground_truth_df[mask]
             det_df_k = detected_df[mask]
@@ -191,37 +196,36 @@ for algorithm in os.listdir(outputs_dir):
                 continue
 
             print(f'\n--- {group_name} (types {list(type_list)}) ---')
-
-            # Root AUC
             root_col = 'label_root_alarm'
             prob_col = 'modified_root_prob'
             if root_col in gt_df_k.columns and prob_col in det_df_k.columns:
                 auc_k = roc_auc_score(gt_df_k[root_col], det_df_k[prob_col])
                 print(f'Root AUC: {auc_k:.3f}')
-
-            # ACC@K for derivatives
             acc_k_types = acc_k(gt_df_k, det_df_k, k=5, only_derivative=True)
             for i in range(1, 6):
                 print(f'AC@{i}: {acc_k_types[i-1]:.3f}', end='  ')
             print()
 
-            # 每个冷启动类型单独看
-            if group_name == 'Cold(F,G)':
-                for t in type_list:
-                    mask_t = type_col == t
-                    gt_df_t = ground_truth_df[mask_t]
-                    det_df_t = detected_df[mask_t]
-                    if len(gt_df_t) == 0:
-                        continue
-                    label = 'F(root)' if t == 5 else 'G(deriv)'
-                    print(f'  Type {int(t)} {label}:')
-                    if root_col in gt_df_t.columns and prob_col in det_df_t.columns:
+            # 每个类型单独看
+            for t in type_list:
+                mask_t = type_col == t
+                gt_df_t = ground_truth_df[mask_t]
+                det_df_t = detected_df[mask_t]
+                if len(gt_df_t) == 0:
+                    continue
+                names = {0:'A',1:'B',2:'C',3:'D',4:'E',5:'F(root)',6:'G(deriv)'}
+                label = names.get(int(t), f'type{t}')
+                print(f'  Type {int(t)} {label}:')
+                if root_col in gt_df_t.columns and prob_col in det_df_t.columns:
+                    try:
                         auc_t = roc_auc_score(gt_df_t[root_col], det_df_t[prob_col])
                         print(f'    Root AUC: {auc_t:.3f}')
-                    acc_t = acc_k(gt_df_t, det_df_t, k=5, only_derivative=True)
-                    for i in range(1, 6):
-                        print(f'    AC@{i}: {acc_t[i-1]:.3f}', end='  ')
-                    print()
+                    except ValueError:
+                        print(f'    Root AUC: nan')
+                acc_t = acc_k(gt_df_t, det_df_t, k=5, only_derivative=True)
+                for i in range(1, 6):
+                    print(f'    AC@{i}: {acc_t[i-1]:.3f}', end='  ')
+                print()
 
     print('-' * 21)
     all_results.append(result)

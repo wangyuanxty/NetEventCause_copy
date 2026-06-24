@@ -39,11 +39,12 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
     """
 
     def __init__(self, embedder_hidden: int = 256, **kwargs):
+        n_types = kwargs.get('n_types', 1)
         super().__init__(**kwargs)
         self.embedder = ContextEmbedder(self.embedding_dim, hidden=embedder_hidden)
-        n_types = kwargs.get('n_types', 1)
         self.register_buffer('_seen_types', torch.zeros(n_types, dtype=torch.bool))
         self._masked: set[int] = set()
+        self._cold_gen_v = None  # 注入 per-position embedding: {k: (b_idx, t_idx, gen_v)}
 
     def set_masked(self, types: set[int]):
         self._masked = types
@@ -63,20 +64,20 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         self, event_seqs, event_type='category',
         need_weights=True, target_type=-1, device=None
     ):
-        """
-        两趟 forward:
-          Pass 1 → history_emb
-          Pass 2 → ContextEmbedder(history_emb) → 替换对应类型行 → log_intensities
-        """
+        """先跑父类 forward, 再对冷启动类型逐位置替换 decoder 权重."""
         if device is None:
             device = self.get_model_device()
 
         replace_types = self._types_to_replace()
-        # 'feat' 模式: 嵌入已在 get_seq_contribution 中预处理, 跳过冷启动替换
-        if not replace_types or event_type == 'feat':
+        cold_data = self._cold_gen_v  # 由 get_seq_contribution 注入
+
+        # 无冷启动类型需要替换 → 直接走父类
+        if not replace_types and cold_data is None:
+            return super().forward(event_seqs, event_type, need_weights, target_type, device)
+        if cold_data is None and event_type == 'feat':
             return super().forward(event_seqs, event_type, need_weights, target_type, device)
 
-        # ── Pass 1: 用原嵌入表跑完整的 encoder ──
+        # ── 跑父类 encoder 拿 history_emb ──
         batch_size, T = event_seqs.size()[:2]
         ts = F.pad(event_seqs[:, :, 0], (1, 0))
         dt = F.pad(ts[:, 1:] - ts[:, :-1], (1, 0))
@@ -94,37 +95,36 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         history_emb, *_ = self.seq_encoder(feat)
         history_emb = self.dropout(history_emb)
 
-        # ── Pass 2: 为 replace_types 生成嵌入, 替换 decoder 中的对应部分 ──
         log_basis_feat = self.shallow_net(history_emb).view(
             batch_size, T, self.n_bases + 1, self.embedding_dim
         )
-
-        # 原嵌入表 [n_types, d]
         all_embeds = self.return_all_parameters(dim=1)  # [d, n_types]
-
-        # 对需要替换的类型, 从 history_emb 生成新嵌入
-        # history_emb[:, i, :] 编码了事件 0..i-1, ≈ h(t_i-)
-        # 事件 i 的嵌入用于 decoder 位置 i
-        # 先算所有类型的 log_basis_weights
         log_basis_weights = log_basis_feat @ all_embeds  # [B, T, n_types, n_bases+1]
 
-        # 冷启动类型: 逐位置生成嵌入, 替换对应位置的 decoder 输出
-        for k in replace_types:
-            if k >= self.current_n_types:
-                continue
-            k_mask = (event_seqs[:, :, 1].long() == k)  # [B, T]
-            if not k_mask.any():
-                continue
-            gen_h = history_emb[k_mask]   # [n, hidden]
-            gen_v = self.embedder(gen_h)  # [n, d], 每个位置独立生成
-            b_idx, t_idx = k_mask.nonzero(as_tuple=True)
-            # 替换: log_basis_weights[b, :, k, t] = log_basis_feat[b,t] · gen_v_i
-            new_weight = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
-            log_basis_weights[b_idx, :, k, t_idx] = new_weight
+        # ── 替换冷启动类型的 decoder 权重 (逐位置 embedding) ──
+        # event_type='feat' 时 event_seqs[:,:,1:] 是嵌入值不是 type ID,
+        # 此时用 cold_data 里预先存在的 per-position embedding
+        if cold_data is not None and event_type == 'feat':
+            for k, (b_idx, t_idx, gen_v) in cold_data.items():
+                new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
+                for j in range(len(b_idx)):
+                    log_basis_weights[b_idx[j], t_idx[j], k, :] = new_w[j]
+        else:
+            # event_type='category' 时可以直接用 type ID 定位
+            for k in replace_types:
+                if k >= self.current_n_types:
+                    continue
+                k_mask = (event_seqs[:, :, 1].long() == k)
+                if not k_mask.any():
+                    continue
+                gen_h = history_emb[k_mask]
+                gen_v = self.embedder(gen_h)
+                b_idx, t_idx = k_mask.nonzero(as_tuple=True)
+                new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)
+                for j in range(len(b_idx)):
+                    log_basis_weights[b_idx[j], t_idx[j], k, :] = new_w[j]
 
         log_basis_weights = log_basis_weights.transpose(-2, -1).contiguous()
-
-        # 强度: + basis_values → logsumexp
         basis_values = torch.cat(
             [basis.log_prob(dt[:, 1:, None]) for basis in self.bases], dim=2
         ).unsqueeze(-2)
@@ -143,55 +143,43 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         self.optim = optim
         mask_ratio = kwargs.get('mask_ratio', 0.15)
         train_types = list(range(self.current_n_types))
-
         train_metrics = defaultdict(AverageMeter)
 
         for batch in train_dataloader:
             if device:
                 batch = batch.to(device)
-
-            # 记录本 batch 出现的类型
             batch_types = set(batch[:, :, 1].long().flatten().tolist())
             self.mark_seen(batch_types)
-
-            # 随机 mask (只 mask 训练集中出现过的已知类型)
             n_mask = max(1, int(len(train_types) * mask_ratio))
             masked = set(np.random.choice(train_types, n_mask, replace=False))
             self.set_masked(masked)
 
             seq_length = (batch.abs().sum(-1) > 0).sum(-1)
-            mask = generate_sequence_mask(seq_length)
-
+            mask_t = generate_sequence_mask(seq_length)
             log_intensities, log_basis_weights = self.forward(
                 batch, need_weights=True, event_type='category'
             )
-
-            nll = self._eval_nll(batch, log_intensities, log_basis_weights, mask)
-
+            nll = self._eval_nll(batch, log_intensities, log_basis_weights, mask_t)
             T_total = batch[range(batch.shape[0]), seq_length - 1, 0].sum()
             prior_log_intensities_loss = (
                 -self.return_all_log_prior().expand(*(batch.size()[:2]), -1)
                 .gather(dim=2, index=batch[:, :, 1:].long())
-                .squeeze(-1).masked_select(mask).sum()
+                .squeeze(-1).masked_select(mask_t).sum()
             ) + self.return_all_log_prior().exp().sum() * T_total
-
             loss = nll + prior_log_intensities_loss
-
             optim.zero_grad()
             loss.backward()
             optim.step()
-
             train_metrics['loss'].update(loss.item(), batch.size(0))
             train_metrics['nll'].update(nll.item(), batch.size(0))
             train_metrics['acc'].update(
-                self._eval_acc(batch, log_intensities, mask), seq_length.sum()
+                self._eval_acc(batch, log_intensities, mask_t), seq_length.sum()
             )
 
         if valid_dataloader is not None:
             valid_metrics = self._eval_epoch(valid_dataloader, device)
         else:
             valid_metrics = {}
-
         return train_metrics, valid_metrics
 
     @torch.no_grad()
@@ -214,9 +202,12 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         return metrics
 
     def get_seq_contribution(self, batch, device=None, steps=50, **kwargs):
+        """
+        覆写父类: 冷启动类型逐位置生成嵌入, 注入 forward 供 IG 循环和强度计算使用.
+        """
         from functools import partial
         from ..explain.integrated_gradient import batch_integrated_gradient
-        from ..utils.torch import set_eval_mode, generate_sequence_mask
+        from ..utils.torch import set_eval_mode
 
         replace_types = self._types_to_replace()
         if not replace_types:
@@ -231,8 +222,8 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
 
         # ── 计算 history_emb ──
         ts = F.pad(batch[:, :, 0], (1, 0))
-        dt = F.pad(ts[:, 1:] - ts[:, :-1], (1, 0))
-        temp_feat = dt[:, :-1].unsqueeze(-1)
+        dt_fwd = F.pad(ts[:, 1:] - ts[:, :-1], (1, 0))
+        temp_feat = dt_fwd[:, :-1].unsqueeze(-1)
         type_feat = self.event_type2embedding(batch)[:, :-1, 1:]
         type_feat = F.pad(type_feat, (0, 0, 1, 0))
         feat = torch.cat([temp_feat, type_feat], dim=-1)
@@ -241,30 +232,27 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
 
         # ── 逐位置生成冷启动嵌入 ──
         type_col = batch[:, :, 1].long()
-        cold_per_pos = {}  # {k: (b_idx, t_idx, gen_v)}
+        cold_data = {}
         for k in replace_types:
             k_mask = (type_col == k)
             if not k_mask.any():
                 continue
             b_idx, t_idx = k_mask.nonzero(as_tuple=True)
-            gen_v = self.embedder(history_emb[k_mask])  # [n, d]
-            cold_per_pos[k] = (b_idx, t_idx, gen_v)
+            gen_v = self.embedder(history_emb[k_mask])
+            cold_data[k] = (b_idx, t_idx, gen_v)
 
-        # ── IG: 用首位置嵌入作为 cold type 的 embedding ──
-        orig_embed = {str(k): self.embed[str(k)].data.clone() for k in replace_types}
-        for k, (b_idx, t_idx, gen_v) in cold_per_pos.items():
-            self.embed[str(k)].data = gen_v[0]  # 首位置嵌入
-
-        inputs = self.event_type2embedding(batch)  # [B, T, 1+d]
-        for k, (b_idx, t_idx, gen_v) in cold_per_pos.items():
-            inputs[b_idx, t_idx, 1:] = gen_v  # 逐位置嵌入到 inputs
+        # ── 注入 cold_data 到 forward, 跑 IG ──
+        self._cold_gen_v = cold_data
+        inputs = self.event_type2embedding(batch)
+        for k, (b_idx, t_idx, gen_v) in cold_data.items():
+            inputs[b_idx, t_idx, 1:] = gen_v
 
         baselines = F.pad(inputs[:, :, :1], (0, self.embedding_dim))
         seq_lengths = (batch.abs().sum(-1) > 0).sum(-1)
         event_scores = torch.zeros(B, T, T - 1, device=device)
 
         def _func(X, p, b):
-            li = self.forward(X, event_type='feat', need_weights=False)
+            li, _ = self.forward(X, event_type='feat', need_weights=True)
             return torch.gather(li[:, p], dim=-1, index=b[:, p, 1:].repeat(X.size(0), 1).long())
 
         for pos in range(T):
@@ -275,28 +263,13 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             )
             event_scores[:, pos] = ig[:, :-1].sum(-1)
 
-        # ── 后处理: per-position 替换 cold type intensity ──
-        log_ints = self.forward(inputs, event_type='feat', need_weights=False)
-        log_basis_feat = self.shallow_net(history_emb).view(B, T, self.n_bases + 1, self.embedding_dim)
-        basis_vals = torch.cat([basis.log_prob(dt[:, 1:, None]) for basis in self.bases], dim=2).unsqueeze(-2)
-        all_embeds = self.return_all_parameters(dim=1)
-
-        for k, (b_idx, t_idx, gen_v) in cold_per_pos.items():
-            lw_all = (log_basis_feat @ all_embeds).transpose(-2, -1)  # [B, n_bases+1, T, n_types]
-            new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)  # [n, n_bases+1]
-            for j in range(len(b_idx)):
-                lw_all[b_idx[j], :, t_idx[j], k] = new_w[j]
-            lw_all = lw_all.transpose(-2, -1)  # [B, T, n_types, n_bases+1]
-            log_ints[:, :, k:k+1] = (lw_all[:, :, k:k+1, :] + basis_vals).logsumexp(dim=-1)
-
+        # ── 计算最终强度 ──
+        log_ints, _ = self.forward(inputs, event_type='feat', need_weights=True)
         log_ints_events = log_ints.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
-        base_ints_events = self.forward(baselines, event_type='feat', need_weights=False)
-        base_ints_events = base_ints_events.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
+        base_ints, _ = self.forward(baselines, event_type='feat', need_weights=True)
+        base_ints_events = base_ints.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
         prior_ints_events = self.event_prior_intensities(batch)
 
-        # 恢复原嵌入
-        for k, v in orig_embed.items():
-            self.embed[str(k)].data = v
-
+        self._cold_gen_v = None
         return (event_scores.detach().cpu(), log_ints_events.detach().cpu(),
                 base_ints_events.detach().cpu(), prior_ints_events.detach().cpu())

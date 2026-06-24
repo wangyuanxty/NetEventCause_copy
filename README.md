@@ -70,6 +70,12 @@ $$
 
 此设计完全复用了原 NEC 的损失计算和评估逻辑，作为新模型 `ERPP-CS` 注册于原训练框架内。
 
+### 关键设计：嵌入归一化
+
+实验中发现 ContextEmbedder 的逐位置生成存在根本性问题：MLP 学会用输出范数反向补偿 $q(h)$ 的差异——deriv 位置 $q(h)$ 偏大，生成 $v$ 的范数偏小；root 位置 $q(h)$ 偏小，生成 $v$ 的范数偏大。结果 $q(h) \cdot v$ 两端拉平，Root/Deriv 区分度归零。
+
+解决方案：对**所有类型嵌入**（已知类型与 ContextEmbedder 输出）做 L2 归一化，强制范数固定为单位长度。ContextEmbedder 只能控制方向不能控制大小，$q(h)$ 的自然差异通过内积体现在 $\lambda$ 中——deriv 位置 $q$ 大 $\lambda$ 大，root 位置 $q$ 小 $\lambda$ 小，区分度恢复。同时覆写 `return_all_parameters` 和 `event_type2embedding` 确保 encoder 输入与 decoder 权重使用一致的归一化嵌入。
+
 ---
 
 ## 4. 训练与推理统一性

@@ -239,16 +239,25 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
         history_emb, *_ = self.seq_encoder(feat)
         history_emb = self.dropout(history_emb)
 
-        # ── 逐位置生成冷启动嵌入, 构建 inputs ──
-        inputs = self.event_type2embedding(batch)  # [B, T, 1+d]
+        # ── 逐位置生成冷启动嵌入 ──
         type_col = batch[:, :, 1].long()
+        cold_per_pos = {}  # {k: (b_idx, t_idx, gen_v)}
         for k in replace_types:
             k_mask = (type_col == k)
             if not k_mask.any():
                 continue
-            gen_v = self.embedder(history_emb[k_mask])  # [n, d], 每位置独立
             b_idx, t_idx = k_mask.nonzero(as_tuple=True)
-            inputs[b_idx, t_idx, 1:] = gen_v
+            gen_v = self.embedder(history_emb[k_mask])  # [n, d]
+            cold_per_pos[k] = (b_idx, t_idx, gen_v)
+
+        # ── IG: 用首位置嵌入作为 cold type 的 embedding ──
+        orig_embed = {str(k): self.embed[str(k)].data.clone() for k in replace_types}
+        for k, (b_idx, t_idx, gen_v) in cold_per_pos.items():
+            self.embed[str(k)].data = gen_v[0]  # 首位置嵌入
+
+        inputs = self.event_type2embedding(batch)  # [B, T, 1+d]
+        for k, (b_idx, t_idx, gen_v) in cold_per_pos.items():
+            inputs[b_idx, t_idx, 1:] = gen_v  # 逐位置嵌入到 inputs
 
         baselines = F.pad(inputs[:, :, :1], (0, self.embedding_dim))
         seq_lengths = (batch.abs().sum(-1) > 0).sum(-1)
@@ -266,11 +275,28 @@ class ColdStartERPP(ExplainableRecurrentPointProcess):
             )
             event_scores[:, pos] = ig[:, :-1].sum(-1)
 
+        # ── 后处理: per-position 替换 cold type intensity ──
         log_ints = self.forward(inputs, event_type='feat', need_weights=False)
+        log_basis_feat = self.shallow_net(history_emb).view(B, T, self.n_bases + 1, self.embedding_dim)
+        basis_vals = torch.cat([basis.log_prob(dt[:, 1:, None]) for basis in self.bases], dim=2).unsqueeze(-2)
+        all_embeds = self.return_all_parameters(dim=1)
+
+        for k, (b_idx, t_idx, gen_v) in cold_per_pos.items():
+            lw_all = (log_basis_feat @ all_embeds).transpose(-2, -1)  # [B, n_bases+1, T, n_types]
+            new_w = (log_basis_feat[b_idx, t_idx] * gen_v.unsqueeze(1)).sum(dim=-1)  # [n, n_bases+1]
+            for j in range(len(b_idx)):
+                lw_all[b_idx[j], :, t_idx[j], k] = new_w[j]
+            lw_all = lw_all.transpose(-2, -1)  # [B, T, n_types, n_bases+1]
+            log_ints[:, :, k:k+1] = (lw_all[:, :, k:k+1, :] + basis_vals).logsumexp(dim=-1)
+
         log_ints_events = log_ints.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
         base_ints_events = self.forward(baselines, event_type='feat', need_weights=False)
         base_ints_events = base_ints_events.gather(dim=2, index=batch[:, :, 1:].long()).squeeze(-1)
         prior_ints_events = self.event_prior_intensities(batch)
+
+        # 恢复原嵌入
+        for k, v in orig_embed.items():
+            self.embed[str(k)].data = v
 
         return (event_scores.detach().cpu(), log_ints_events.detach().cpu(),
                 base_ints_events.detach().cpu(), prior_ints_events.detach().cpu())

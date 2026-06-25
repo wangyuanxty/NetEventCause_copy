@@ -4,7 +4,7 @@
 >
 > 原仓库：[github.com/yuanzhaolin/NetEventCause](https://github.com/yuanzhaolin/NetEventCause)
 >
-> 本仓库：[github.com/wangyuanxty/NetEventCause_copy](https://github.com/wangyuanxty/NetEventCause_copy)
+> 本实验代码仓库：[github.com/wangyuanxty/NetEventCause_copy](https://github.com/wangyuanxty/NetEventCause_copy)
 
 ---
 
